@@ -99,8 +99,27 @@ function DataTable({ headers, rows }: { headers: string[]; rows: string[][] }) {
 function SectionView({ view, query, filteredResidentRows, paymentRows, open }: { view: View; query: string; filteredResidentRows: string[][]; paymentRows: string[][]; open: (v: Exclude<Modal, null>) => void }) {
   const { units, overdueResidents, auditLogs, sendReminder, canSendAutomatedReminders, canAccessAdvancedReports, canAccessAuditLogs, currentTier, setTier, currentSociety, refreshData } = useSociety()
   const [seeding, setSeeding] = useState(false)
-  const [seedMsg, setSeedMsg] = useState('')
-  const handleSeed = async () => { setSeeding(true); setSeedMsg(''); try { const r = await seedDatabase(); await refreshData(); setSeedMsg(`Seeded: ${r.units} units, ${r.invoices} invoices, ${r.payments} payments.`) } catch { setSeedMsg('Seed failed — is Supabase configured?') } finally { setSeeding(false) } }
+  const [seedMsg, setSeedMsg] = useState<'success' | 'error' | null>(null)
+  const [seedDetail, setSeedDetail] = useState('')
+  const handleSeed = async () => {
+    setSeeding(true); setSeedMsg(null); setSeedDetail('')
+    console.log('[Seed Database] Starting…')
+    try {
+      const r = await seedDatabase()
+      console.log('[Seed Database] Done:', r)
+      await refreshData()
+      setSeedMsg('success')
+      setSeedDetail(`${r.units} units, ${r.invoices} invoices, ${r.payments} payments seeded.`)
+    } catch (err: unknown) {
+      setSeedMsg('error')
+      const msg = err instanceof Error ? err.message : String(err)
+      setSeedDetail(msg.includes('supabase') || msg.includes('SUPABASE')
+        ? 'Supabase is not configured. Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY.'
+        : msg || 'An unexpected error occurred during seeding.')
+    } finally {
+      setSeeding(false)
+    }
+  }
   const config: Record<View, { title: string; subtitle: string; action?: Exclude<Modal, null> }> = { Properties: { title: 'Properties', subtitle: 'Manage units, blocks, and occupancy across your society.', action: 'property' }, Residents: { title: 'Residents', subtitle: 'Keep resident contacts and account status up to date.', action: 'resident' }, Billing: { title: 'Billing & charges', subtitle: 'Create monthly invoices and monitor what is due.', action: 'charges' }, Payments: { title: 'Payments', subtitle: 'Review incoming payments and receipts.', action: 'payment' }, Reminders: { title: 'Payment reminders', subtitle: 'Follow up with residents who have outstanding balances.', action: 'reminder' }, Reports: { title: 'Reports', subtitle: 'Understand collections and society performance.', action: undefined }, Settings: { title: 'Settings', subtitle: 'Configure your society and administrator preferences.', action: undefined }, Dashboard: { title: 'Dashboard', subtitle: '', action: undefined } }
   const c = config[view]
 
@@ -184,7 +203,7 @@ function SectionView({ view, query, filteredResidentRows, paymentRows, open }: {
       <div className="panel" style={{ marginTop: 14 }}>
         <div className="panel-head"><div><h2>Developer Tools</h2><p>Manage seed data for testing</p></div></div>
         <div className="settings-section">
-          <div className="settings-row"><span className="settings-label">Reset &amp; Seed Demo Data</span><div className="seed-actions"><Button variant="outline" size="sm" onClick={handleSeed} disabled={seeding}>{seeding ? 'Seeding…' : 'Seed Database'}</Button>{seedMsg && <span className="seed-msg">{seedMsg}</span>}</div></div>
+          <div className="settings-row"><span className="settings-label">Reset &amp; Seed Demo Data</span><div className="seed-actions"><Button type="button" variant="outline" size="sm" className="seed-btn" onClick={handleSeed} disabled={seeding}>{seeding ? <><span className="seed-spinner" />Seeding…</> : 'Seed Database'}</Button>{seedMsg === 'success' && <span className="seed-msg seed-success">✓ {seedDetail}</span>}{seedMsg === 'error' && <span className="seed-msg seed-error">✗ {seedDetail}</span>}</div></div>
         </div>
       </div>
 
