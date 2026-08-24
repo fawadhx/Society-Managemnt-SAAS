@@ -68,6 +68,13 @@ button { cursor: pointer; }
 .add-society-form { margin-top: 12px }
 .society-list-item.locked { opacity: .5; cursor: not-allowed }
 .society-list-item.locked:hover { background: transparent }
+.society-delete-btn { display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 6px; border: 1px solid transparent; background: transparent; color: var(--muted-foreground); cursor: pointer; transition: background .12s, color .12s, border-color .12s; flex-shrink: 0; margin-left: 4px }
+.society-delete-btn:hover { background: #fbeeee; color: var(--danger); border-color: var(--danger) }
+
+/* ── Empty state ──────────────────────────────── */
+.empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 48px 24px; text-align: center; color: var(--muted-foreground) }
+.empty-state h3 { margin: 14px 0 6px; font-size: 15px; color: var(--foreground) }
+.empty-state p { margin: 0; font-size: 12px }
 
 /* ── Tier info bar (Dashboard) ──────────────────── */
 .tier-info-bar { display: flex; align-items: center; gap: 8px; padding: 10px 16px; background: var(--muted); border-radius: 8px; margin-bottom: 14px; font-size: 12px; color: var(--muted-foreground) }
@@ -107,6 +114,14 @@ button { cursor: pointer; }
 .pricing-features li { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 5px 0 }
 .pricing-features li.included { color: var(--foreground) }
 .pricing-features li.excluded { color: var(--muted-foreground); opacity: .5 }
+
+/* ── Table row actions ────────────────────────── */
+.row-actions { display: flex; align-items: center; gap: 4px }
+.action-btn { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--border); background: #fff; color: var(--muted-foreground); cursor: pointer; transition: background .12s, color .12s, border-color .12s }
+.action-btn:hover { background: var(--muted); color: var(--foreground) }
+.action-delete:hover { background: #fbeeee; color: var(--danger); border-color: var(--danger) }
+.action-pay:hover { background: var(--secondary); color: var(--primary); border-color: var(--primary) }
+.action-view:hover { background: var(--secondary); color: var(--primary); border-color: var(--primary) }
 
 /* ── Tier active check (Reminders) ────────────── */
 .tier-active-check { display: inline-block; margin-top: 6px; font-size: 10px; font-weight: 700; color: var(--primary); letter-spacing: .03em }

@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { X, Home, CheckCircle2, Plus, Lock, Building2 } from 'lucide-react'
+import { X, Home, CheckCircle2, Plus, Lock, Building2, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useSociety, type Society } from '@/lib/society-context'
 
@@ -11,7 +11,7 @@ type Props = {
 }
 
 export default function SocietySwitcherModal({ close, onSuccess }: Props) {
-  const { societies, currentSociety, switchSociety, addSociety, canAccessAuditLogs } = useSociety()
+  const { societies, currentSociety, switchSociety, addSociety, deleteSociety, canAccessAuditLogs } = useSociety()
   const [showAdd, setShowAdd] = useState(false)
   const [newName, setNewName] = useState('')
   const [newAddress, setNewAddress] = useState('')
@@ -20,6 +20,14 @@ export default function SocietySwitcherModal({ close, onSuccess }: Props) {
     if (society.id === currentSociety.id) { close(); return }
     await switchSociety(society.id)
     onSuccess(`Switched to ${society.name}`)
+  }
+
+  const handleDelete = async (e: React.MouseEvent, society: Society) => {
+    e.stopPropagation()
+    if (!confirm(`Delete ${society.name}? This will remove all associated units and invoices.`)) return
+    if (societies.length <= 1) { alert('Cannot delete the last society.'); return }
+    await deleteSociety(society.id)
+    onSuccess(`${society.name} deleted.`)
   }
 
   const handleAdd = async () => {
@@ -55,6 +63,7 @@ export default function SocietySwitcherModal({ close, onSuccess }: Props) {
                 <span>{s.address}</span>
               </div>
               {s.id === currentSociety.id && <CheckCircle2 size={18} className="society-check" />}
+              {societies.length > 1 && <button className="society-delete-btn" onClick={(e) => handleDelete(e, s)} title={`Delete ${s.name}`} aria-label={`Delete ${s.name}`}><Trash2 size={14} /></button>}
             </button>
           ))}
         </div>

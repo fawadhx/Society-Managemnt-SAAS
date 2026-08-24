@@ -86,9 +86,29 @@ export type SocietyActions = {
   refreshData: () => Promise<void>
   switchSociety: (societyId: string) => void
   addSociety: (name: string, address: string) => void
+  deleteUnit: (unitId: string) => Promise<void>
+  deletePayment: (paymentId: string) => Promise<void>
+  deleteSociety: (societyId: string) => Promise<void>
 }
 
 /* ── Context shape ──────────────────────────────────────── */
+
+export type SocietyStats = {
+  totalCollection: number
+  totalOutstanding: number
+  totalInvoiced: number
+  collectionRate: number
+  overdueCount: number
+  unitCount: number
+  paidCount: number
+  totalInvoiceCount: number
+  paidInvoiceCount: number
+  partialInvoiceCount: number
+  overdueInvoiceCount: number
+  paidPercent: number
+  partialPercent: number
+  overduePercent: number
+}
 
 export type SocietyState = {
   units: Unit[]
@@ -101,6 +121,7 @@ export type SocietyState = {
   adminName: string
   societies: Society[]
   currentSociety: Society
+  stats: SocietyStats
 }
 
 type Permissions = {
@@ -274,16 +295,20 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
 
         // Build a unit-id → unit map for joins
         const unitIdMap = new Map<string, { unitNumber: string; ownerName: string; phone: string }>()
+        const societyUnitIds: string[] = []
         for (const u of unitsData ?? []) {
           unitIdMap.set(u.id as string, {
             unitNumber: u.unit_number as string,
             ownerName: u.owner_name as string,
             phone: u.phone as string,
           })
+          societyUnitIds.push(u.id as string)
         }
 
-        // 3. Fetch invoices
-        const { data: invoicesData } = await sb!.from('invoices').select('*').order('created_at', { ascending: false })
+        // 3. Fetch invoices (filtered to this society's units)
+        const { data: invoicesData } = societyUnitIds.length > 0
+          ? await sb!.from('invoices').select('*').in('unit_id', societyUnitIds).order('created_at', { ascending: false })
+          : { data: [] as Record<string, unknown>[] }
         if (cancelled) return
 
         const dbInvoices: Invoice[] = (invoicesData ?? []).map((inv: Record<string, unknown>) => {
@@ -315,8 +340,11 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
             }
           })
 
-        // 5. Fetch payments
-        const { data: paymentsData } = await sb!.from('payments').select('*').order('created_at', { ascending: false })
+        // 5. Fetch payments (filtered to this society's invoices)
+        const societyInvoiceIds = dbInvoices.map(i => i.id)
+        const { data: paymentsData } = societyInvoiceIds.length > 0
+          ? await sb!.from('payments').select('*').in('invoice_id', societyInvoiceIds).order('created_at', { ascending: false })
+          : { data: [] as Record<string, unknown>[] }
         if (cancelled) return
 
         const dbPayments: PaymentRecord[] = (paymentsData ?? []).map((p: Record<string, unknown>, idx: number) => {
@@ -402,11 +430,16 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
         monthlyCharge: society.default_fee as number,
       }))
       const unitIdMap = new Map<string, { unitNumber: string; ownerName: string; phone: string }>()
+      const societyUnitIds: string[] = []
       for (const u of unitsData ?? []) {
         unitIdMap.set(u.id as string, { unitNumber: u.unit_number as string, ownerName: u.owner_name as string, phone: u.phone as string })
+        societyUnitIds.push(u.id as string)
       }
 
-      const { data: invoicesData } = await sb.from('invoices').select('*').order('created_at', { ascending: false })
+      // Filter invoices to only those belonging to this society's units
+      const { data: invoicesData } = societyUnitIds.length > 0
+        ? await sb.from('invoices').select('*').in('unit_id', societyUnitIds).order('created_at', { ascending: false })
+        : { data: [] as Record<string, unknown>[] }
       const dbInvoices: Invoice[] = (invoicesData ?? []).map((inv: Record<string, unknown>) => {
         const unit = unitIdMap.get(inv.unit_id as string)
         return { id: inv.id as string, unitNumber: unit?.unitNumber ?? '', residentName: unit?.ownerName ?? '', amount: inv.amount as number, outstanding: inv.outstanding as number, period: inv.period as string, status: inv.status as Invoice['status'], dueDate: inv.due_date as string }
@@ -418,7 +451,11 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
         return { id: `r-${u.unitNumber}`, name: uInfo?.ownerName ?? '', unitNumber: u.unitNumber, phone: uInfo?.phone ?? '', outstandingBalance: inv?.outstanding ?? 0, status: (inv?.status === 'Paid' ? 'Paid' : inv?.status === 'Partial' ? 'Partial' : 'Overdue') as Resident['status'] }
       })
 
-      const { data: paymentsData } = await sb.from('payments').select('*').order('created_at', { ascending: false })
+      // Filter payments to only those belonging to this society's invoices
+      const societyInvoiceIds = dbInvoices.map(i => i.id)
+      const { data: paymentsData } = societyInvoiceIds.length > 0
+        ? await sb.from('payments').select('*').in('invoice_id', societyInvoiceIds).order('created_at', { ascending: false })
+        : { data: [] as Record<string, unknown>[] }
       const dbPayments: PaymentRecord[] = (paymentsData ?? []).map((p: Record<string, unknown>, idx: number) => {
         const inv = dbInvoices.find(i => i.id === p.invoice_id)
         return { id: p.id as string, receiptId: (p.receipt_number as string) ?? `REC-${1000 + idx}`, residentName: inv?.residentName ?? '', unitNumber: inv?.unitNumber ?? '', amount: p.amount_paid as number, date: p.created_at as string, method: p.method as string }
@@ -462,8 +499,27 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
   /* ── switchSociety: switch active society and reload ── */
   const switchSociety = useCallback(async (societyId: string) => {
     const target = societies.find(s => s.id === societyId)
-    if (target) setCurrentSociety(target)
-    if (SB) await fetchSocietyData(societyId)
+    if (!target) return
+    setCurrentSociety(target)
+    if (SB) {
+      await fetchSocietyData(societyId)
+    } else {
+      // Mock mode: only society '1' has data, clear for others
+      if (societyId !== '1') {
+        setUnits([])
+        setResidents([])
+        setInvoices([])
+        setPayments([])
+        setOverdueResidents([])
+        setAuditLogs([])
+      } else {
+        setUnits(initialUnits)
+        setResidents(initialResidents)
+        setInvoices(initialInvoices)
+        setPayments(initialPayments)
+        setOverdueResidents(initialOverdue)
+      }
+    }
   }, [societies, fetchSocietyData])
 
   /* ── addSociety: create a new society locally (+ Supabase if configured) ── */
@@ -490,6 +546,131 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
   const canBatchGenerate = currentTier !== 'TIER_1'
   const canAccessAdvancedReports = currentTier !== 'TIER_1'
   const canAccessAuditLogs = currentTier === 'TIER_3'
+
+  /* ── Computed stats (derived from current data) ── */
+  const stats: SocietyStats = useMemo(() => {
+    const totalInvoiced = invoices.reduce((sum, i) => sum + i.amount, 0)
+    const totalCollection = payments.reduce((sum, p) => sum + p.amount, 0)
+    const totalOutstanding = invoices.reduce((sum, i) => sum + i.outstanding, 0)
+    const collectionRate = totalInvoiced > 0 ? Math.round((totalCollection / totalInvoiced) * 1000) / 10 : 0
+    const overdueCount = overdueResidents.length
+    const unitCount = units.length
+    const totalInvoiceCount = invoices.length
+    const paidInvoiceCount = invoices.filter(i => i.status === 'Paid').length
+    const partialInvoiceCount = invoices.filter(i => i.status === 'Partial').length
+    const overdueInvoiceCount = invoices.filter(i => i.status === 'Overdue').length
+    const paidPercent = totalInvoiceCount > 0 ? Math.round((paidInvoiceCount / totalInvoiceCount) * 1000) / 10 : 0
+    const partialPercent = totalInvoiceCount > 0 ? Math.round((partialInvoiceCount / totalInvoiceCount) * 1000) / 10 : 0
+    const overduePercent = totalInvoiceCount > 0 ? Math.round((overdueInvoiceCount / totalInvoiceCount) * 1000) / 10 : 0
+    const paidCount = paidInvoiceCount
+    return { totalCollection, totalOutstanding, totalInvoiced, collectionRate, overdueCount, unitCount, paidCount, totalInvoiceCount, paidInvoiceCount, partialInvoiceCount, overdueInvoiceCount, paidPercent, partialPercent, overduePercent }
+  }, [invoices, payments, overdueResidents, units])
+
+  /* ── deleteSociety: remove a society and all its data ── */
+  const deleteSociety = useCallback(async (societyId: string) => {
+    const target = societies.find(s => s.id === societyId)
+    if (!target) return
+    // Prevent deleting the last society
+    if (societies.length <= 1) return
+
+    // Local state: remove society and switch to first remaining
+    const remaining = societies.filter(s => s.id !== societyId)
+    setSocieties(remaining)
+
+    // If deleting the active society, switch to the first remaining
+    if (currentSociety.id === societyId) {
+      const fallback = remaining[0]
+      setCurrentSociety(fallback)
+      // Clear data since we're switching away
+      setUnits([])
+      setResidents([])
+      setInvoices([])
+      setPayments([])
+      setOverdueResidents([])
+      setAuditLogs([])
+    }
+
+    // Supabase persist
+    if (SB) {
+      try {
+        const sb = getSupabase()
+        if (!sb) return
+        await sb.from('societies').delete().eq('id', societyId)
+      } catch (err) {
+        console.error('[deleteSociety] Supabase delete failed:', err)
+      }
+    }
+  }, [societies, currentSociety])
+
+  /* ── deleteUnit: remove a unit (+ related invoices/payments) ── */
+  const deleteUnit = useCallback(async (unitId: string) => {
+    const targetUnit = units.find(u => u.id === unitId)
+    if (!targetUnit) return
+    const label = `${targetUnit.unitNumber} (${targetUnit.type})`
+
+    // Local state update
+    setUnits(prev => prev.filter(u => u.id !== unitId))
+    setInvoices(prev => prev.filter(i => {
+      // Remove invoices whose unitNumber matches
+      return i.unitNumber !== targetUnit.unitNumber
+    }))
+    setPayments(prev => prev.filter(p => p.unitNumber !== targetUnit.unitNumber))
+    setResidents(prev => prev.filter(r => r.unitNumber !== targetUnit.unitNumber))
+    setOverdueResidents(prev => prev.filter(r => r.unitNumber !== targetUnit.unitNumber))
+
+    // Audit log (TIER_3 only)
+    if (canAccessAuditLogs) {
+      setAuditLogs(prev => [{
+        id: `al${Date.now()}`,
+        action: 'UNIT_DELETED',
+        performedBy: 'admin',
+        metadata: { unitId, unitNumber: targetUnit.unitNumber, type: targetUnit.type },
+        timestamp: new Date().toISOString(),
+      }, ...prev])
+    }
+
+    // Supabase persist
+    if (SB) {
+      try {
+        const sb = getSupabase()
+        if (!sb) return
+        await sb.from('units').delete().eq('id', unitId)
+      } catch (err) {
+        console.error('[deleteUnit] Supabase delete failed:', err)
+      }
+    }
+  }, [units, canAccessAuditLogs])
+
+  /* ── deletePayment: remove a payment record ── */
+  const deletePayment = useCallback(async (paymentId: string) => {
+    const targetPayment = payments.find(p => p.id === paymentId)
+    if (!targetPayment) return
+
+    // Local state update
+    setPayments(prev => prev.filter(p => p.id !== paymentId))
+
+    // Audit log (TIER_3 only)
+    if (canAccessAuditLogs) {
+      setAuditLogs(prev => [{
+        id: `al${Date.now()}`,
+        action: 'PAYMENT_DELETED',
+        performedBy: 'admin',
+        metadata: { paymentId, receiptId: targetPayment.receiptId, unit: targetPayment.unitNumber, amount: targetPayment.amount },
+        timestamp: new Date().toISOString(),
+      }, ...prev])
+    }
+
+    // Supabase persist
+    if (SB) {
+      try {
+        const sb = getSupabase()
+        if (!sb) return
+        await sb.from('payments').delete().eq('id', paymentId)
+      } catch (err) {
+        console.error('[deletePayment] Supabase delete failed:', err)
+      }
+    }
+  }, [payments, canAccessAuditLogs])
 
   /* ── recordPayment ─────────────────────────────────────── */
 
@@ -723,12 +904,12 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
 
   const value = useMemo<SocietyContextValue>(
     () => ({
-      units, residents, invoices, payments, overdueResidents, auditLogs, currentTier, adminName, societies, currentSociety, loading, setTier, setAdminName,
-      recordPayment, sendReminder, generateMonthlyInvoices, refreshData, switchSociety, addSociety, fetchSocietyData,
+      units, residents, invoices, payments, overdueResidents, auditLogs, currentTier, adminName, societies, currentSociety, stats, loading, setTier, setAdminName,
+      recordPayment, sendReminder, generateMonthlyInvoices, refreshData, switchSociety, addSociety, fetchSocietyData, deleteUnit, deletePayment, deleteSociety,
       canSendAutomatedReminders, canBatchGenerate, canAccessAdvancedReports, canAccessAuditLogs,
     }),
-    [units, residents, invoices, payments, overdueResidents, auditLogs, currentTier, adminName, societies, currentSociety, loading, setTier, setAdminName,
-     recordPayment, sendReminder, generateMonthlyInvoices, refreshData, switchSociety, addSociety, fetchSocietyData,
+    [units, residents, invoices, payments, overdueResidents, auditLogs, currentTier, adminName, societies, currentSociety, stats, loading, setTier, setAdminName,
+     recordPayment, sendReminder, generateMonthlyInvoices, refreshData, switchSociety, addSociety, fetchSocietyData, deleteUnit, deletePayment, deleteSociety,
      canSendAutomatedReminders, canBatchGenerate, canAccessAdvancedReports, canAccessAuditLogs],
   )
 
