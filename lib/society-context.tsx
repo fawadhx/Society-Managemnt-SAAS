@@ -12,6 +12,9 @@ export type Unit = {
   block: string
   occupancy: 'Occupied' | 'Vacant'
   monthlyCharge: number
+  societyId?: string
+  ownerName?: string
+  phone?: string
 }
 
 export type Resident = {
@@ -20,7 +23,9 @@ export type Resident = {
   unitNumber: string
   phone: string
   outstandingBalance: number
-  status: 'Paid' | 'Overdue' | 'Partial' | 'Active'
+  status: 'Paid' | 'Overdue' | 'Partial' | 'Pending' | 'Active'
+  securityDeposit?: number
+  advanceRent?: number
 }
 
 export type Invoice = {
@@ -80,15 +85,20 @@ export const TIER_INFO: Record<SubscriptionTier, { label: string; name: string; 
 /* ── Actions ────────────────────────────────────────────── */
 
 export type SocietyActions = {
-  recordPayment: (invoiceId: string, amount: number, method: string) => void
+  recordPayment: (invoiceId: string, amount: number, method: string, date?: string) => void
   sendReminder: (residentId: string) => void
-  generateMonthlyInvoices: (period: string, defaultAmount: number) => void
+  generateMonthlyInvoices: (period: string, defaultAmount: number, dueDate?: string) => void
   refreshData: () => Promise<void>
   switchSociety: (societyId: string) => void
   addSociety: (name: string, address: string) => void
+  addUnit: (unitNumber: string, block: string, monthlyCharge?: number) => void
+  updateUnit: (unitId: string, updates: { unitNumber?: string; block?: string; occupancy?: 'Occupied' | 'Vacant'; monthlyCharge?: number }) => void
+  assignResident: (unitNumber: string, residentName: string, phone: string, opts?: { email?: string; securityDeposit?: number; advanceRent?: number }) => void
+  updateResident: (unitNumber: string, updates: { name?: string; phone?: string; occupancy?: 'Occupied' | 'Vacant' }) => void
   deleteUnit: (unitId: string) => Promise<void>
   deletePayment: (paymentId: string) => Promise<void>
   deleteSociety: (societyId: string) => Promise<void>
+  checkoutResident: (unitNumber: string, action: 'refund' | 'forfeit') => void
 }
 
 /* ── Context shape ──────────────────────────────────────── */
@@ -247,9 +257,11 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
   const unitsRef = useRef(units)
   const residentsRef = useRef(residents)
   const overdueRef = useRef(overdueResidents)
+  const invoicesRef = useRef(invoices)
   unitsRef.current = units
   residentsRef.current = residents
   overdueRef.current = overdueResidents
+  invoicesRef.current = invoices
 
   /* ── Supabase: fetch initial data ──────────────────────── */
 
@@ -547,6 +559,267 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
   const canAccessAdvancedReports = currentTier !== 'TIER_1'
   const canAccessAuditLogs = currentTier === 'TIER_3'
 
+  /* ── addUnit: create a Vacant property (no owner) ──────── */
+  const addUnit = useCallback((unitNumber: string, block: string, monthlyCharge?: number) => {
+    const societyId = currentSociety.id
+    const charge = monthlyCharge ?? 12500
+
+    const newUnit: Unit = {
+      id: `u${Date.now()}`,
+      unitNumber,
+      type: 'Apartment',
+      block,
+      occupancy: 'Vacant',
+      monthlyCharge: charge,
+      societyId,
+    }
+
+    setUnits(prev => [...prev, newUnit])
+
+    if (canAccessAuditLogs) {
+      setAuditLogs(prev => [{
+        id: `al${Date.now()}`,
+        action: 'UNIT_CREATED',
+        performedBy: 'admin',
+        metadata: { unitNumber, block, monthlyCharge: charge },
+        timestamp: new Date().toISOString(),
+      }, ...prev])
+    }
+
+    if (SB) {
+      (async () => {
+        try {
+          const sb = getSupabase()
+          if (!sb) return
+          const { data, error } = await sb.from('units').insert({
+            society_id: societyId,
+            unit_number: unitNumber,
+            owner_name: null,
+            phone: null,
+            status: 'Vacant',
+          }).select('id').single()
+          if (error) throw error
+          if (data) {
+            setUnits(prev => prev.map(u => u.id === newUnit.id ? { ...u, id: data.id as string } : u))
+          }
+          if (canAccessAuditLogs) await writeAudit(societyId, 'UNIT_CREATED', { unitNumber, block })
+        } catch (err) {
+          console.error('[addUnit] Supabase persist failed:', err)
+        }
+      })()
+    }
+  }, [currentSociety, canAccessAuditLogs])
+
+  /* ── updateUnit: edit property details ─────────────────── */
+  const updateUnit = useCallback((unitId: string, updates: { unitNumber?: string; block?: string; occupancy?: 'Occupied' | 'Vacant'; monthlyCharge?: number }) => {
+    setUnits(prev => prev.map(u => u.id === unitId ? { ...u, ...updates } : u))
+
+    if (SB) {
+      (async () => {
+        try {
+          const sb = getSupabase()
+          if (!sb) return
+          const dbUpdates: Record<string, unknown> = {}
+          if (updates.unitNumber) dbUpdates.unit_number = updates.unitNumber
+          if (updates.block) dbUpdates.unit_number = updates.unitNumber // Supabase uses unit_number
+          if (updates.occupancy) dbUpdates.status = updates.occupancy
+          // If marking Vacant, clear owner fields
+          if (updates.occupancy === 'Vacant') {
+            dbUpdates.owner_name = null
+            dbUpdates.phone = null
+          }
+          if (Object.keys(dbUpdates).length > 0) {
+            await sb.from('units').update(dbUpdates).eq('id', unitId)
+          }
+        } catch (err) {
+          console.error('[updateUnit] Supabase persist failed:', err)
+        }
+      })()
+    }
+  }, [])
+
+  /* ── assignResident: assign a resident to a Vacant unit ── */
+  const assignResident = useCallback((unitNumber: string, residentName: string, phone: string, opts?: { email?: string; securityDeposit?: number; advanceRent?: number }) => {
+    const displayName = residentName.trim()
+    const displayPhone = phone.trim() || '—'
+    const secDep = opts?.securityDeposit ?? 0
+    const advRent = opts?.advanceRent ?? 0
+
+    // Update unit to Occupied with owner info
+    setUnits(prev => prev.map(u => u.unitNumber === unitNumber ? { ...u, occupancy: 'Occupied', ownerName: displayName, phone: displayPhone } : u))
+
+    // Add resident record — defaults to Pending (no payment made yet)
+    setResidents(prev => [...prev, {
+      id: `r-${unitNumber}`,
+      name: displayName,
+      unitNumber,
+      phone: displayPhone,
+      outstandingBalance: secDep + advRent,
+      status: 'Pending' as Resident['status'],
+      securityDeposit: secDep,
+      advanceRent: advRent,
+    }])
+
+    if (canAccessAuditLogs) {
+      setAuditLogs(prev => [{
+        id: `al${Date.now()}`,
+        action: 'RESIDENT_ASSIGNED',
+        performedBy: 'admin',
+        metadata: { unitNumber, residentName: displayName, phone: displayPhone },
+        timestamp: new Date().toISOString(),
+      }, ...prev])
+    }
+
+    if (SB) {
+      (async () => {
+        try {
+          const sb = getSupabase()
+          if (!sb) return
+          // Find the unit by unit_number and society_id
+          const { data: unitRow } = await sb.from('units')
+            .select('id')
+            .eq('unit_number', unitNumber)
+            .eq('society_id', currentSociety.id)
+            .limit(1).single()
+          if (unitRow) {
+            await sb.from('units').update({
+              owner_name: displayName,
+              phone: displayPhone,
+              status: 'Occupied',
+            }).eq('id', unitRow.id)
+          }
+          if (canAccessAuditLogs) {
+            await writeAudit(currentSociety.id, 'RESIDENT_ASSIGNED', { unitNumber, residentName: displayName })
+          }
+        } catch (err) {
+          console.error('[assignResident] Supabase persist failed:', err)
+        }
+      })()
+    }
+  }, [currentSociety, canAccessAuditLogs])
+
+  /* ── updateResident: edit resident details + occupancy ── */
+  const updateResident = useCallback((unitNumber: string, updates: { name?: string; phone?: string; occupancy?: 'Occupied' | 'Vacant' }) => {
+    // Update the resident record
+    if (updates.name || updates.phone) {
+      setResidents(prev => prev.map(r => r.unitNumber === unitNumber ? {
+        ...r,
+        ...(updates.name ? { name: updates.name } : {}),
+        ...(updates.phone ? { phone: updates.phone } : {}),
+      } : r))
+    }
+
+    // If occupancy is changing to Vacant, clear the resident entirely
+    if (updates.occupancy === 'Vacant') {
+      setResidents(prev => prev.filter(r => r.unitNumber !== unitNumber))
+    }
+
+    // Also update the unit
+    setUnits(prev => prev.map(u => u.unitNumber === unitNumber ? {
+      ...u,
+      ...(updates.occupancy ? { occupancy: updates.occupancy } : {}),
+      ...(updates.name ? { ownerName: updates.name } : {}),
+      ...(updates.phone ? { phone: updates.phone } : {}),
+      ...(updates.occupancy === 'Vacant' ? { ownerName: undefined, phone: undefined } : {}),
+    } : u))
+
+    if (SB) {
+      (async () => {
+        try {
+          const sb = getSupabase()
+          if (!sb) return
+          const { data: unitRow } = await sb.from('units')
+            .select('id').eq('unit_number', unitNumber).eq('society_id', currentSociety.id).limit(1).single()
+          if (unitRow) {
+            const dbUpdates: Record<string, unknown> = {}
+            if (updates.name) dbUpdates.owner_name = updates.name
+            if (updates.phone) dbUpdates.phone = updates.phone
+            if (updates.occupancy) dbUpdates.status = updates.occupancy
+            if (updates.occupancy === 'Vacant') { dbUpdates.owner_name = null; dbUpdates.phone = null }
+            if (Object.keys(dbUpdates).length > 0) await sb.from('units').update(dbUpdates).eq('id', unitRow.id)
+          }
+        } catch (err) {
+          console.error('[updateResident] Supabase persist failed:', err)
+        }
+      })()
+    }
+  }, [currentSociety])
+
+  /* ── checkoutResident: terminate lease with refund or forfeit ── */
+  const checkoutResident = useCallback((unitNumber: string, action: 'refund' | 'forfeit') => {
+    const resident = residents.find(r => r.unitNumber === unitNumber)
+    if (!resident) return
+
+    const deposit = resident.securityDeposit ?? 0
+    const outstanding = resident.outstandingBalance
+
+    if (action === 'forfeit') {
+      // Forfeit deposit: apply toward outstanding rent or retain as settlement
+      const settlementAmount = Math.min(deposit, outstanding)
+      const retainedAmount = deposit - settlementAmount
+
+      // If deposit covers partial outstanding, reduce it
+      if (settlementAmount > 0) {
+        setInvoices(prev => prev.map(i => {
+          if (i.unitNumber !== unitNumber || i.status === 'Paid') return i
+          const newOutstanding = Math.max(0, i.outstanding - settlementAmount)
+          return { ...i, outstanding: newOutstanding, status: newOutstanding === 0 ? 'Paid' : 'Partial' as Invoice['status'] }
+        }))
+        setResidents(prev => prev.map(r => {
+          if (r.unitNumber !== unitNumber) return r
+          return { ...r, outstandingBalance: Math.max(0, r.outstandingBalance - settlementAmount) }
+        }))
+      }
+
+      // Audit settlement entry
+      setAuditLogs(prev => [{
+        id: `al${Date.now()}`,
+        action: 'DEPOSIT_FORFEITED',
+        performedBy: 'admin',
+        metadata: { unitNumber, residentName: resident.name, deposit, settlementAmount, retainedAmount, reason: retainedAmount > 0 ? 'Retained for damages/notice' : 'Applied to outstanding rent' },
+        timestamp: new Date().toISOString(),
+      }, ...prev])
+    }
+    // action === 'refund': deposit is returned (no financial adjustment needed)
+
+    // Remove overdue entry
+    setOverdueResidents(prev => prev.filter(o => o.unitNumber !== unitNumber))
+
+    // Remove resident record
+    setResidents(prev => prev.filter(r => r.unitNumber !== unitNumber))
+
+    // Set unit to Vacant
+    setUnits(prev => prev.map(u => u.unitNumber === unitNumber ? { ...u, occupancy: 'Vacant', ownerName: undefined, phone: undefined } : u))
+
+    // Audit log
+    setAuditLogs(prev => [{
+      id: `al${Date.now() + 1}`,
+      action: 'RESIDENT_CHECKED_OUT',
+      performedBy: 'admin',
+      metadata: { unitNumber, residentName: resident.name, action, depositRefunded: action === 'refund' ? deposit : 0, depositForfeited: action === 'forfeit' ? deposit : 0 },
+      timestamp: new Date().toISOString(),
+    }, ...prev])
+
+    // Supabase persist
+    if (SB) {
+      (async () => {
+        try {
+          const sb = getSupabase()
+          if (!sb) return
+          const { data: unitRow } = await sb.from('units').select('id').eq('unit_number', unitNumber).eq('society_id', currentSociety.id).limit(1).single()
+          if (unitRow) {
+            await sb.from('units').update({ status: 'Vacant', owner_name: null, phone: null }).eq('id', unitRow.id)
+          }
+          if (canAccessAuditLogs) {
+            await writeAudit(currentSociety.id, 'RESIDENT_CHECKED_OUT', { unitNumber, action, deposit })
+          }
+        } catch (err) {
+          console.error('[checkoutResident] Supabase persist failed:', err)
+        }
+      })()
+    }
+  }, [residents, currentSociety, canAccessAuditLogs])
+
   /* ── Computed stats (derived from current data) ── */
   const stats: SocietyStats = useMemo(() => {
     const totalInvoiced = invoices.reduce((sum, i) => sum + i.amount, 0)
@@ -674,7 +947,7 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
 
   /* ── recordPayment ─────────────────────────────────────── */
 
-  const recordPayment = useCallback(async (invoiceId: string, amount: number, method: string) => {
+  const recordPayment = useCallback(async (invoiceId: string, amount: number, method: string, dateOverride?: string) => {
     // --- Local state update (always, serves as optimistic update) ---
     const currentInvoices = unitsRef.current.length ? invoices : initialInvoices
     const inv = currentInvoices.find(i => i.id === invoiceId)
@@ -709,7 +982,7 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
         residentName: resident?.name ?? inv?.residentName ?? '',
         unitNumber: inv?.unitNumber ?? '',
         amount,
-        date: fmtDate(new Date()),
+        date: dateOverride || fmtDate(new Date()),
         method,
       }
       return [newPayment, ...prev]
@@ -810,22 +1083,32 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
 
   /* ── generateMonthlyInvoices ───────────────────────────── */
 
-  const generateMonthlyInvoices = useCallback(async (period: string, defaultAmount: number) => {
+  const generateMonthlyInvoices = useCallback(async (period: string, defaultAmount: number, dueDateOverride?: string) => {
     const activeUnits = (unitsRef.current.length ? unitsRef.current : initialUnits).filter(u => u.occupancy === 'Occupied')
     const currentResidents = residentsRef.current.length ? residentsRef.current : initialResidents
     const currentOverdue = overdueRef.current
-    const dueDay = 10
-    const dueDate = `${dueDay} ${period}`
+    const dueDate = dueDateOverride || `10 ${period}`
 
     // --- Local state update ---
+    // Calculate arrears: sum of unpaid balance from previous invoices per unit
+    const currentInvoices = invoicesRef.current.length ? invoicesRef.current : initialInvoices
+    const arrearsMap = new Map<string, number>()
+    for (const inv of currentInvoices) {
+      if (inv.outstanding > 0 && inv.status !== 'Paid') {
+        arrearsMap.set(inv.unitNumber, (arrearsMap.get(inv.unitNumber) ?? 0) + inv.outstanding)
+      }
+    }
+
     const newInvoices: Invoice[] = activeUnits.map(u => {
       const resident = currentResidents.find(r => r.unitNumber === u.unitNumber)
+      const arrears = arrearsMap.get(u.unitNumber) ?? 0
+      const totalDue = defaultAmount + arrears
       return {
         id: `inv${nextInvoiceNum++}`,
         unitNumber: u.unitNumber,
         residentName: resident?.name ?? '',
-        amount: defaultAmount,
-        outstanding: defaultAmount,
+        amount: totalDue,
+        outstanding: totalDue,
         period,
         status: 'Pending' as const,
         dueDate,
@@ -905,11 +1188,11 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo<SocietyContextValue>(
     () => ({
       units, residents, invoices, payments, overdueResidents, auditLogs, currentTier, adminName, societies, currentSociety, stats, loading, setTier, setAdminName,
-      recordPayment, sendReminder, generateMonthlyInvoices, refreshData, switchSociety, addSociety, fetchSocietyData, deleteUnit, deletePayment, deleteSociety,
+      recordPayment, sendReminder, generateMonthlyInvoices, refreshData, switchSociety, addSociety, addUnit, updateUnit, assignResident, updateResident, fetchSocietyData, deleteUnit, deletePayment, deleteSociety, checkoutResident,
       canSendAutomatedReminders, canBatchGenerate, canAccessAdvancedReports, canAccessAuditLogs,
     }),
     [units, residents, invoices, payments, overdueResidents, auditLogs, currentTier, adminName, societies, currentSociety, stats, loading, setTier, setAdminName,
-     recordPayment, sendReminder, generateMonthlyInvoices, refreshData, switchSociety, addSociety, fetchSocietyData, deleteUnit, deletePayment, deleteSociety,
+     recordPayment, sendReminder, generateMonthlyInvoices, refreshData, switchSociety, addSociety, addUnit, updateUnit, assignResident, updateResident, fetchSocietyData, deleteUnit, deletePayment, deleteSociety, checkoutResident,
      canSendAutomatedReminders, canBatchGenerate, canAccessAdvancedReports, canAccessAuditLogs],
   )
 

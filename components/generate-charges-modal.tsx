@@ -10,8 +10,17 @@ const fmt = (value: number) => `PKR ${value.toLocaleString('en-PK')}`
 type Props = { close: () => void; onSuccess: (msg: string) => void }
 
 export default function GenerateChargesModal({ close, onSuccess }: Props) {
-  const { units, generateMonthlyInvoices } = useSociety()
+  const { units, invoices, generateMonthlyInvoices } = useSociety()
   const activeUnits = useMemo(() => units.filter(u => u.occupancy === 'Occupied'), [units])
+
+  // Calculate arrears from previous unpaid invoices
+  const totalArrears = useMemo(() => {
+    let sum = 0
+    for (const inv of invoices) {
+      if (inv.outstanding > 0 && inv.status !== 'Paid') sum += inv.outstanding
+    }
+    return sum
+  }, [invoices])
 
   const [period, setPeriod] = useState(() => {
     const d = new Date()
@@ -27,13 +36,13 @@ export default function GenerateChargesModal({ close, onSuccess }: Props) {
   })
 
   const parsedFee = Number(fee) || 0
-  const totalRevenue = activeUnits.length * parsedFee
+  const totalRevenue = activeUnits.length * parsedFee + totalArrears
   const isValid = period.trim().length > 0 && parsedFee > 0
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (!isValid) return
-    generateMonthlyInvoices(period.trim(), parsedFee)
+    generateMonthlyInvoices(period.trim(), parsedFee, dueDate)
     close()
     onSuccess(`Generated ${activeUnits.length} invoices for ${period.trim()} — total ${fmt(totalRevenue)}.`)
   }
@@ -80,7 +89,8 @@ export default function GenerateChargesModal({ close, onSuccess }: Props) {
               <p className="preview-label">Preview</p>
               <div className="preview-row"><span>Active units to bill</span><strong>{activeUnits.length}</strong></div>
               <div className="preview-row"><span>Fee per unit</span><strong>{fmt(parsedFee)}</strong></div>
-              <div className="preview-row preview-total"><span>Total revenue</span><strong>{fmt(totalRevenue)}</strong></div>
+              {totalArrears > 0 && <div className="preview-row" style={{ color: 'var(--danger)' }}><span>Arrears (unpaid balance)</span><strong>{fmt(totalArrears)}</strong></div>}
+              <div className="preview-row preview-total"><span>Total due</span><strong>{fmt(totalRevenue)}</strong></div>
             </div>
           </div>
           <div className="modal-actions">

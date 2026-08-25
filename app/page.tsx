@@ -5,7 +5,7 @@ import {
   ArrowDownRight, ArrowUpRight, Bell, Building2, CalendarDays, ChevronDown, CircleDollarSign,
   CreditCard, FileText, HelpCircle, Home, LayoutDashboard, MoreHorizontal, Plus,
   Receipt, Search, Settings, ShieldCheck, Users, WalletCards, X, Send, Download, CheckCircle2,
-  AlertCircle, Clock3, TrendingUp, Landmark, SlidersHorizontal, Lock, PanelLeftClose, PanelLeft,
+  AlertCircle, Clock3, TrendingUp, Landmark, SlidersHorizontal, Lock, PanelLeftClose, PanelLeft, Pencil,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useSociety, TIER_INFO, type SubscriptionTier } from '@/lib/society-context'
@@ -17,7 +17,7 @@ import NotificationsModal from '@/components/notifications-modal'
 import { seedDatabase } from '@/lib/seed'
 
 type View = 'Dashboard' | 'Properties' | 'Residents' | 'Billing' | 'Payments' | 'Reminders' | 'Reports' | 'Settings'
-type Modal = 'charges' | 'payment' | 'reminder' | 'property' | 'resident' | null
+type Modal = 'charges' | 'payment' | 'reminder' | 'property' | 'resident' | 'editProperty' | 'editResident' | 'checkout' | null
 
 const nav: { label: View; icon: typeof Home }[] = [
   { label: 'Dashboard', icon: LayoutDashboard }, { label: 'Properties', icon: Building2 },
@@ -28,26 +28,184 @@ const nav: { label: View; icon: typeof Home }[] = [
 const fmt = (value: number) => `PKR ${value.toLocaleString('en-PK')}`
 
 function Status({ children }: { children: string }) {
-  const tone = children === 'Paid' || children === 'Active' ? 'status-paid' : children === 'Overdue' ? 'status-overdue' : 'status-partial'
+  const tone = children === 'Paid' || children === 'Active' ? 'status-paid' : children === 'Overdue' ? 'status-overdue' : children === 'Occupied' ? 'status-occupied' : children === 'Vacant' ? 'status-vacant' : children === 'Pending' ? 'status-pending' : 'status-partial'
   return <span className={`status ${tone}`}><span className="status-dot" />{children}</span>
 }
 
-function ModalCard({ type, close, onSave }: { type: Exclude<Modal, null>; close: () => void; onSave: () => void }) {
-  const title = type === 'charges' ? 'Generate monthly charges' : type === 'payment' ? 'Record a payment' : type === 'reminder' ? 'Send payment reminder' : type === 'property' ? 'Add a property' : 'Add a resident'
+function PropertyModal({ close, onSuccess }: { close: () => void; onSuccess: (msg: string) => void }) {
+  const { addUnit, currentSociety } = useSociety()
+  const [unitNumber, setUnitNumber] = useState('')
+  const [block, setBlock] = useState('')
+  const [monthlyCharge, setMonthlyCharge] = useState('12500')
+
+  const handleSubmit = () => {
+    if (!unitNumber.trim() || !block.trim()) return
+    addUnit(unitNumber.trim(), block.trim(), parseInt(monthlyCharge) || 12500)
+    onSuccess(`Vacant unit ${unitNumber.trim()} created in ${currentSociety.name}`)
+  }
+
   return <div className="modal-backdrop" role="dialog" aria-modal="true"><div className="modal-card">
-    <div className="modal-head"><div><p className="eyebrow">Society workflow</p><h2>{title}</h2></div><button className="icon-button" onClick={close} aria-label="Close"><X size={18} /></button></div>
+    <div className="modal-head"><div><p className="eyebrow">Add new property</p><h2>Add a property</h2></div><button className="icon-button" onClick={close} aria-label="Close"><X size={18} /></button></div>
     <div className="form-grid">
-      <label>{type === 'resident' ? 'Resident name' : type === 'property' ? 'Unit number' : 'Account / unit'}<input placeholder={type === 'resident' ? 'e.g. Ayesha Malik' : type === 'property' ? 'e.g. C-302' : 'Search or select'} /></label>
-      <label>{type === 'property' ? 'Block' : type === 'resident' ? 'Unit number' : 'Amount'}<input placeholder={type === 'property' ? 'Select block' : type === 'resident' ? 'e.g. A-101' : 'PKR 12,500'} /></label>
-      <label className="span-2">Notes <textarea placeholder="Add an optional note for your records" /></label>
+      <label>Unit number <input value={unitNumber} onChange={e => setUnitNumber(e.target.value)} placeholder="e.g. C-302" /></label>
+      <label>Block / Location <input value={block} onChange={e => setBlock(e.target.value)} placeholder="e.g. C" /></label>
+      <label>Monthly maintenance fee (PKR) <input value={monthlyCharge} onChange={e => setMonthlyCharge(e.target.value)} type="number" placeholder="12500" /></label>
     </div>
-    <div className="modal-actions"><Button variant="outline" onClick={close}>Cancel</Button><Button onClick={onSave}><CheckCircle2 data-icon="inline-start" />Save {type === 'reminder' ? 'reminder' : 'record'}</Button></div>
+    <p className="modal-hint">New properties default to <strong>Vacant</strong> status. Use "Add Resident" to assign an owner.</p>
+    <div className="modal-actions">
+      <Button variant="outline" onClick={close}>Cancel</Button>
+      <Button onClick={handleSubmit} disabled={!unitNumber.trim() || !block.trim()}>
+        <CheckCircle2 data-icon="inline-start" />Add property</Button>
+    </div>
+  </div></div>
+}
+
+function AddResidentModal({ close, onSuccess }: { close: () => void; onSuccess: (msg: string) => void }) {
+  const { units, assignResident, currentSociety } = useSociety()
+  const vacantUnits = units.filter(u => u.occupancy === 'Vacant')
+  const [selectedUnit, setSelectedUnit] = useState(vacantUnits[0]?.unitNumber ?? '')
+  const [name, setName] = useState('')
+  const [phone, setPhone] = useState('')
+  const [email, setEmail] = useState('')
+  const [securityDeposit, setSecurityDeposit] = useState(String(units.find(u => u.unitNumber === vacantUnits[0]?.unitNumber)?.monthlyCharge ?? 12500))
+  const [advanceRent, setAdvanceRent] = useState('0')
+  const selectedUnitObj = units.find(u => u.unitNumber === selectedUnit)
+
+  const handleUnitChange = (unitNum: string) => {
+    setSelectedUnit(unitNum)
+    const u = units.find(u2 => u2.unitNumber === unitNum)
+    if (u) setSecurityDeposit(String(u.monthlyCharge))
+  }
+
+  const handleSubmit = () => {
+    if (!selectedUnit || !name.trim()) return
+    assignResident(selectedUnit, name.trim(), phone.trim(), {
+      email: email.trim() || undefined,
+      securityDeposit: Number(securityDeposit) || 0,
+      advanceRent: Number(advanceRent) || 0,
+    })
+    onSuccess(`${name.trim()} assigned to ${selectedUnit} in ${currentSociety.name}`)
+  }
+
+  return <div className="modal-backdrop" role="dialog" aria-modal="true"><div className="modal-card">
+    <div className="modal-head"><div><p className="eyebrow">Assign to vacant unit</p><h2>Add a resident</h2></div><button className="icon-button" onClick={close} aria-label="Close"><X size={18} /></button></div>
+    {vacantUnits.length === 0 ? <div className="empty-state" style={{ padding: '32px 20px' }}><AlertCircle size={28} strokeWidth={1.5} color="var(--muted-foreground)" /><p style={{ margin: '8px 0 0', fontSize: 12 }}>No vacant units available. Create a property first.</p></div> : <>
+    <div className="form-grid">
+      <label>Select vacant unit <select value={selectedUnit} onChange={e => handleUnitChange(e.target.value)}>{vacantUnits.map(u => <option key={u.id} value={u.unitNumber}>{u.unitNumber} — Block {u.block}</option>)}</select></label>
+      <label>Resident name <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Ayesha Malik" /></label>
+      <label>Phone number <input value={phone} onChange={e => setPhone(e.target.value)} placeholder="e.g. 0300 1234567" /></label>
+      <label>Email <input value={email} onChange={e => setEmail(e.target.value)} placeholder="e.g. ayesha@email.com (optional)" /></label>
+      <label>Security Deposit (1 Month) <input type="number" value={securityDeposit} onChange={e => setSecurityDeposit(e.target.value)} placeholder={selectedUnitObj ? String(selectedUnitObj.monthlyCharge) : '12500'} /></label>
+      <label>Advance Rent <input type="number" value={advanceRent} onChange={e => setAdvanceRent(e.target.value)} placeholder="0" /></label>
+    </div>
+    <p className="modal-hint">Account starts with <strong>Pending</strong> status. Security deposit auto-fills from the unit's monthly fee.</p>
+    <div className="modal-actions">
+      <Button variant="outline" onClick={close}>Cancel</Button>
+      <Button onClick={handleSubmit} disabled={!selectedUnit || !name.trim()}>
+        <CheckCircle2 data-icon="inline-start" />Assign resident</Button>
+    </div>
+    </>}</div></div>
+}
+
+function EditPropertyModal({ unitId, close, onSuccess }: { unitId: string; close: () => void; onSuccess: (msg: string) => void }) {
+  const { units, updateUnit } = useSociety()
+  const unit = units.find(u => u.id === unitId)
+  const [block, setBlock] = useState(unit?.block ?? '')
+  const [occupancy, setOccupancy] = useState<'Occupied' | 'Vacant'>(unit?.occupancy ?? 'Vacant')
+  const [monthlyCharge, setMonthlyCharge] = useState(String(unit?.monthlyCharge ?? 12500))
+
+  if (!unit) return null
+
+  const handleSubmit = () => {
+    updateUnit(unitId, {
+      block: block.trim() || unit.block,
+      occupancy,
+      monthlyCharge: parseInt(monthlyCharge) || unit.monthlyCharge,
+    })
+    onSuccess(`Unit ${unit.unitNumber} updated`)
+  }
+
+  return <div className="modal-backdrop" role="dialog" aria-modal="true"><div className="modal-card">
+    <div className="modal-head"><div><p className="eyebrow">{unit.unitNumber}</p><h2>Edit property</h2></div><button className="icon-button" onClick={close} aria-label="Close"><X size={18} /></button></div>
+    <div className="form-grid">
+      <label>Block / Location <input value={block} onChange={e => setBlock(e.target.value)} /></label>
+      <label>Occupancy <select value={occupancy} onChange={e => setOccupancy(e.target.value as 'Occupied' | 'Vacant')}><option value="Occupied">Occupied</option><option value="Vacant">Vacant</option></select></label>
+      <label>Monthly fee (PKR) <input value={monthlyCharge} onChange={e => setMonthlyCharge(e.target.value)} type="number" /></label>
+    </div>
+    <div className="modal-actions">
+      <Button variant="outline" onClick={close}>Cancel</Button>
+      <Button onClick={handleSubmit}><CheckCircle2 data-icon="inline-start" />Save changes</Button>
+    </div>
+  </div></div>
+}
+
+function EditResidentModal({ unitNumber, close, onSuccess }: { unitNumber: string; close: () => void; onSuccess: (msg: string) => void }) {
+  const { residents, updateResident } = useSociety()
+  const resident = residents.find(r => r.unitNumber === unitNumber)
+  const [name, setName] = useState(resident?.name ?? '')
+  const [phone, setPhone] = useState(resident?.phone ?? '')
+  const [occupancy, setOccupancy] = useState<'Occupied' | 'Vacant'>('Occupied')
+
+  const handleSubmit = () => {
+    if (!name.trim()) return
+    updateResident(unitNumber, {
+      name: name.trim(),
+      phone: phone.trim(),
+      occupancy,
+    })
+    onSuccess(occupancy === 'Vacant' ? `Resident removed from ${unitNumber} — unit now Vacant` : `${name.trim()} updated for ${unitNumber}`)
+  }
+
+  return <div className="modal-backdrop" role="dialog" aria-modal="true"><div className="modal-card">
+    <div className="modal-head"><div><p className="eyebrow">{unitNumber}</p><h2>Edit resident</h2></div><button className="icon-button" onClick={close} aria-label="Close"><X size={18} /></button></div>
+    <div className="form-grid">
+      <label>Resident name <input value={name} onChange={e => setName(e.target.value)} /></label>
+      <label>Phone number <input value={phone} onChange={e => setPhone(e.target.value)} placeholder="e.g. 0300 1234567" /></label>
+      <label>Unit status <select value={occupancy} onChange={e => setOccupancy(e.target.value as 'Occupied' | 'Vacant')}><option value="Occupied">Occupied</option><option value="Vacant">Vacant (remove resident)</option></select></label>
+    </div>
+    <div className="modal-actions">
+      <Button variant="outline" onClick={close}>Cancel</Button>
+      <Button onClick={handleSubmit} disabled={!name.trim()}><CheckCircle2 data-icon="inline-start" />Save changes</Button>
+    </div>
+  </div></div>
+}
+
+function CheckoutModal({ unitNumber, close, onSuccess }: { unitNumber: string; close: () => void; onSuccess: (msg: string) => void }) {
+  const { residents, checkoutResident } = useSociety()
+  const resident = residents.find(r => r.unitNumber === unitNumber)
+  const deposit = resident?.securityDeposit ?? 0
+  const outstanding = resident?.outstandingBalance ?? 0
+
+  if (!resident) return null
+
+  return <div className="modal-backdrop" role="dialog" aria-modal="true"><div className="modal-card">
+    <div className="modal-head"><div><p className="eyebrow">Lease termination</p><h2>Checkout {resident.name}</h2></div><button className="icon-button" onClick={close} aria-label="Close"><X size={18} /></button></div>
+    <div style={{ padding: '22px 24px' }}>
+      <div style={{ background: '#f8fafc', borderRadius: 8, padding: 16, marginBottom: 16 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}><span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>Unit</span><strong style={{ fontSize: 12 }}>{unitNumber}</strong></div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}><span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>Security Deposit</span><strong style={{ fontSize: 12 }}>{fmt(deposit)}</strong></div>
+        <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>Outstanding Balance</span><strong style={{ fontSize: 12, color: outstanding > 0 ? 'var(--danger)' : 'var(--primary)' }}>{fmt(outstanding)}</strong></div>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <button style={{ width: '100%', padding: '14px 16px', border: '1px solid var(--primary)', borderRadius: 8, background: '#fff', cursor: 'pointer', textAlign: 'left', transition: '.15s' }} onClick={() => { checkoutResident(unitNumber, 'refund'); onSuccess(`Deposit of ${fmt(deposit)} refunded to ${resident.name}. Unit ${unitNumber} is now Vacant.`) }}>
+          <strong style={{ fontSize: 13, color: 'var(--primary)' }}>Full Refund</strong><br />
+          <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>Return the full security deposit and set unit to Vacant.</span>
+        </button>
+        <button style={{ width: '100%', padding: '14px 16px', border: '1px solid var(--danger)', borderRadius: 8, background: '#fff', cursor: 'pointer', textAlign: 'left', transition: '.15s' }} onClick={() => { checkoutResident(unitNumber, 'forfeit'); const settlement = Math.min(deposit, outstanding); const retained = deposit - settlement; onSuccess(`Deposit of ${fmt(deposit)} ${retained > 0 ? 'retained (damages/notice)' : 'applied to rent'}. ${unitNumber} is now Vacant.`) }}>
+          <strong style={{ fontSize: 13, color: 'var(--danger)' }}>Forfeit / Retain Deposit</strong><br />
+          <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>{outstanding > 0 ? `Apply ${fmt(Math.min(deposit, outstanding))} toward outstanding rent, retain ${fmt(deposit - Math.min(deposit, outstanding))}.` : `Retain ${fmt(deposit)} for missing notice or damages.`}</span>
+        </button>
+      </div>
+    </div>
+    <div className="modal-actions">
+      <Button variant="outline" onClick={close}>Cancel</Button>
+    </div>
   </div></div>
 }
 
 export default function Page() {
   const { residents: ctxResidents, payments: ctxPayments, overdueResidents: ctxOverdue, sendReminder, recordPayment, currentTier, setTier, adminName, setAdminName, currentSociety } = useSociety()
-  const [view, setView] = useState<View>('Dashboard'); const [mobileNav, setMobileNav] = useState(false); const [modal, setModal] = useState<Modal>(null); const [notice, setNotice] = useState(''); const [query, setQuery] = useState(''); const [trend, setTrend] = useState<'collection' | 'outstanding'>('collection'); const [profileModal, setProfileModal] = useState(false); const [societyModal, setSocietyModal] = useState(false); const [notificationsModal, setNotificationsModal] = useState(false); const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [view, setView] = useState<View>('Dashboard'); const [mobileNav, setMobileNav] = useState(false); const [modal, setModal] = useState<Modal>(null); const [notice, setNotice] = useState(''); const [query, setQuery] = useState(''); const [trend, setTrend] = useState<'collection' | 'outstanding'>('collection'); const [profileModal, setProfileModal] = useState(false); const [societyModal, setSocietyModal] = useState(false); const [notificationsModal, setNotificationsModal] = useState(false);  const [sidebarCollapsed, setSidebarCollapsed] = useState(false); const [editingUnit, setEditingUnit] = useState<string | null>(null); const [editingResident, setEditingResident] = useState<string | null>(null)
 
   const residentRows = useMemo(() => ctxResidents.map(r => [r.unitNumber, r.name, r.phone, fmt(r.outstandingBalance), r.status]), [ctxResidents])
   const paymentRows = useMemo(() => ctxPayments.map(p => [p.receiptId, p.residentName, p.unitNumber, fmt(p.amount), p.date, p.method]), [ctxPayments])
@@ -55,7 +213,6 @@ export default function Page() {
 
   const open = (value: Exclude<Modal, null>) => setModal(value)
   const notify = (msg: string) => { setNotice(msg); setTimeout(() => setNotice(''), 3000) }
-  const save = () => { setModal(null); notify('Your update was saved successfully.') }
   return <div className="app-shell">
     <aside className={`sidebar ${mobileNav ? 'sidebar-open' : ''} ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
       <div className="brand"><div className="brand-mark"><Building2 size={19} /></div><span className="brand-text">Society <b>Manager</b></span><button className="sidebar-toggle icon-button" onClick={() => { if (mobileNav) setMobileNav(false); else setSidebarCollapsed(s => !s) }} aria-label="Toggle sidebar" title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}>{sidebarCollapsed ? <PanelLeft size={18} /> : <PanelLeftClose size={18} />}</button></div>
@@ -67,12 +224,16 @@ export default function Page() {
       <header className="topbar"><div className="crumb"><span>Society Manager</span><b>/</b><strong>{view}</strong></div><div className="top-actions"><select className="tier-select" value={currentTier} onChange={e => setTier(e.target.value as SubscriptionTier)}><option value="TIER_1">T1 Basic</option><option value="TIER_2">T2 Pro</option><option value="TIER_3">T3 Enterprise</option></select><div className="search"><Search size={16} /><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search anything..." /><kbd>⌘ K</kbd></div><button className="icon-button notification" aria-label="Notifications" onClick={() => setNotificationsModal(true)}><Bell size={18} /><i /></button><div className="top-avatar clickable" onClick={() => setProfileModal(true)} title="Edit profile">{adminName.split(' ').map(n => n[0]).join('').toUpperCase()}</div></div></header>
       <div className="page-wrap">
         {notice && <div className="toast"><CheckCircle2 size={17} />{notice}</div>}
-        {view === 'Dashboard' ? <Dashboard trend={trend} setTrend={setTrend} open={open} /> : <SectionView view={view} query={query} filteredResidentRows={filteredResidentRows} paymentRows={paymentRows} open={open} notify={notify} />}
+        {view === 'Dashboard' ? <Dashboard trend={trend} setTrend={setTrend} open={open} /> : <SectionView view={view} query={query} filteredResidentRows={filteredResidentRows} paymentRows={paymentRows} open={open} notify={notify} onEditUnit={(id) => { setEditingUnit(id); setModal('editProperty') }} onEditResident={(unitNum) => { setEditingResident(unitNum); setModal('editResident') }} onCheckout={(unitNum) => { setEditingResident(unitNum); setModal('checkout') }} />}
       </div>
     </main>
     {modal === 'payment' && <RecordPaymentModal close={() => setModal(null)} onSuccess={(msg) => { setModal(null); notify(msg) }} />}
     {modal === 'charges' && <GenerateChargesModal close={() => setModal(null)} onSuccess={(msg) => { setModal(null); notify(msg) }} />}
-    {modal && modal !== 'payment' && modal !== 'charges' && <ModalCard type={modal} close={() => setModal(null)} onSave={save} />}
+    {modal === 'property' && <PropertyModal close={() => setModal(null)} onSuccess={(msg) => { setModal(null); notify(msg) }} />}
+    {modal === 'resident' && <AddResidentModal close={() => setModal(null)} onSuccess={(msg) => { setModal(null); notify(msg) }} />}
+    {modal === 'editProperty' && editingUnit && <EditPropertyModal unitId={editingUnit} close={() => { setModal(null); setEditingUnit(null) }} onSuccess={(msg) => { setModal(null); setEditingUnit(null); notify(msg) }} />}
+    {modal === 'editResident' && editingResident && <EditResidentModal unitNumber={editingResident} close={() => { setModal(null); setEditingResident(null) }} onSuccess={(msg) => { setModal(null); setEditingResident(null); notify(msg) }} />}
+    {modal === 'checkout' && editingResident && <CheckoutModal unitNumber={editingResident} close={() => { setModal(null); setEditingResident(null) }} onSuccess={(msg) => { setModal(null); setEditingResident(null); notify(msg) }} />}
     {profileModal && <EditProfileModal initialName={adminName} onSaveName={setAdminName} close={() => setProfileModal(false)} onSuccess={(msg) => { setProfileModal(false); notify(msg) }} />}
     {societyModal && <SocietySwitcherModal close={() => setSocietyModal(false)} onSuccess={(msg) => { setSocietyModal(false); notify(msg) }} />}
     {notificationsModal && <NotificationsModal close={() => setNotificationsModal(false)} />}
@@ -96,8 +257,8 @@ function Legend({ color, label, value }: { color: string; label: string; value: 
 function DataTable({ headers, rows }: { headers: string[]; rows: string[][] }) { return <div className="table-scroll"><table><thead><tr>{headers.map(h => <th key={h}>{h}</th>)}</tr></thead><tbody>{rows.map(row => <tr key={row[0]}>{row.map((cell, i) => <td key={cell}>{i === 1 ? <strong>{cell}</strong> : i === 3 ? <strong>{cell}</strong> : cell}</td>)}</tr>)}</tbody></table></div> }
 
 
-function SectionView({ view, query, filteredResidentRows, paymentRows, open, notify }: { view: View; query: string; filteredResidentRows: string[][]; paymentRows: string[][]; open: (v: Exclude<Modal, null>) => void; notify: (msg: string) => void }) {
-  const { units, residents, payments: ctxPayments, overdueResidents, auditLogs, sendReminder, canSendAutomatedReminders, canAccessAdvancedReports, canAccessAuditLogs, currentTier, setTier, currentSociety, refreshData, deleteUnit, deletePayment, stats } = useSociety()
+function SectionView({ view, query, filteredResidentRows, paymentRows, open, notify, onEditUnit, onEditResident, onCheckout }: { view: View; query: string; filteredResidentRows: string[][]; paymentRows: string[][]; open: (v: Exclude<Modal, null>) => void; notify: (msg: string) => void; onEditUnit: (unitId: string) => void; onEditResident: (unitNumber: string) => void; onCheckout: (unitNumber: string) => void }) {
+  const { units, residents, payments: ctxPayments, overdueResidents, invoices: ctxInvoices, auditLogs, sendReminder, canSendAutomatedReminders, canAccessAdvancedReports, canAccessAuditLogs, currentTier, setTier, currentSociety, refreshData, deleteUnit, deletePayment, stats } = useSociety()
   const [seeding, setSeeding] = useState(false)
   const [seedMsg, setSeedMsg] = useState<'success' | 'error' | null>(null)
   const [seedDetail, setSeedDetail] = useState('')
@@ -168,6 +329,7 @@ function SectionView({ view, query, filteredResidentRows, paymentRows, open, not
               <li className="excluded"><Lock size={14} />Multi-society management</li>
               <li className="excluded"><Lock size={14} />Audit logs</li>
             </ul>
+            {currentTier !== 'TIER_1' ? <div className="pricing-current">Current Plan</div> : <Button size="sm" className="pricing-upgrade-btn" onClick={() => { if (confirm('Upgrade to T2 Pro (PKR 3,000/mo)? Batch billing, WhatsApp automation, and advanced reports will be unlocked.')) { setTier('TIER_2'); notify('Upgraded to T2 Pro! Features unlocked.') } }}>Upgrade to T2 Pro</Button>}
           </div>
           <div className={`pricing-col ${currentTier === 'TIER_2' ? 'active' : ''}`}>
             <div className="pricing-head"><h3>T2 Pro</h3><strong>PKR 3,000<small>/mo</small></strong></div>
@@ -182,6 +344,7 @@ function SectionView({ view, query, filteredResidentRows, paymentRows, open, not
               <li className="excluded"><Lock size={14} />Multi-society management</li>
               <li className="excluded"><Lock size={14} />Audit logs</li>
             </ul>
+            {currentTier === 'TIER_2' ? <Button size="sm" className="pricing-upgrade-btn" onClick={() => { if (confirm('Upgrade to T3 Enterprise (PKR 5,000/mo)? Multi-society management and audit logs will be unlocked.')) { setTier('TIER_3'); notify('Upgraded to T3 Enterprise! All features unlocked.') } }}>Upgrade to T3 Enterprise</Button> : currentTier === 'TIER_3' ? <div className="pricing-current">Current Plan</div> : <Button size="sm" variant="outline" className="pricing-upgrade-btn" onClick={() => { if (confirm('Upgrade to T3 Enterprise (PKR 5,000/mo)? All features including multi-society and audit logs will be unlocked.')) { setTier('TIER_3'); notify('Upgraded to T3 Enterprise! All features unlocked.') } }}>Upgrade to T3 Enterprise</Button>}
           </div>
           <div className={`pricing-col ${currentTier === 'TIER_3' ? 'active' : ''}`}>
             <div className="pricing-head"><h3>T3 Enterprise</h3><strong>PKR 5,000<small>/mo</small></strong></div>
@@ -196,6 +359,7 @@ function SectionView({ view, query, filteredResidentRows, paymentRows, open, not
               <li className="included"><CheckCircle2 size={14} />Multi-society management</li>
               <li className="included"><CheckCircle2 size={14} />Audit logs</li>
             </ul>
+            {currentTier === 'TIER_3' ? <div className="pricing-current">Current Plan</div> : <Button size="sm" variant="outline" className="pricing-upgrade-btn" onClick={() => { if (confirm('Upgrade to T3 Enterprise (PKR 5,000/mo)? All features including multi-society and audit logs will be unlocked.')) { setTier('TIER_3'); notify('Upgraded to T3 Enterprise! All features unlocked.') } }}>Upgrade to T3 Enterprise</Button>}
           </div>
         </div>
       </div>
@@ -281,7 +445,7 @@ function SectionView({ view, query, filteredResidentRows, paymentRows, open, not
       <div className="table-scroll"><table><thead><tr>
         {view === 'Residents' && <><th>Unit</th><th>Resident</th><th>Phone</th><th>Outstanding</th><th>Status</th><th>Actions</th></>}
         {view === 'Payments' && <><th>Receipt</th><th>Resident</th><th>Unit</th><th>Amount</th><th>Date</th><th>Method</th><th>Actions</th></>}
-        {view !== 'Residents' && view !== 'Payments' && <><th>Unit</th><th>Type</th><th>Location</th><th>Occupancy</th><th>Monthly charge</th><th>Actions</th></>}
+        {view !== 'Residents' && view !== 'Payments' && <><th>Unit</th><th>Resident</th><th>Location</th><th>Status</th><th>Monthly Charge</th><th>Arrears</th><th>Total Due</th><th>Actions</th></>}
       </tr></thead><tbody>
         {view === 'Residents' && filteredResidentRows.map(row => {
           const resident = residents.find(r => r.unitNumber === row[0])
@@ -289,7 +453,8 @@ function SectionView({ view, query, filteredResidentRows, paymentRows, open, not
             <td>{row[0]}</td><td><strong>{row[1]}</strong></td><td>{row[2]}</td><td><strong>{row[3]}</strong></td>
             <td><Status>{row[4]}</Status></td>
             <td className="row-actions">
-              <button className="action-btn action-view" title="View Details"><FileText size={13} /></button>
+              <button className="action-btn action-edit" title="Edit resident" onClick={() => onEditResident(row[0])}><Pencil size={13} /></button>
+              {resident && (resident.securityDeposit ?? 0) > 0 && <button className="action-btn action-checkout" title="Checkout / Terminate Lease" onClick={() => onCheckout(row[0])}><AlertCircle size={13} /></button>}
               <button className="action-btn action-delete" title="Delete" onClick={() => { if (!resident) return; if (!confirm(`Delete resident ${resident.name}?`)) return; deleteUnit(resident.unitNumber).then(() => notify(`Deleted ${resident.name}.`)) }}><X size={13} /></button>
             </td>
           </tr>
@@ -301,14 +466,22 @@ function SectionView({ view, query, filteredResidentRows, paymentRows, open, not
             <button className="action-btn action-delete" title="Delete" onClick={() => handleDeletePayment(p.id, p.receiptId)}><X size={13} /></button>
           </td>
         </tr>)}
-        {view !== 'Residents' && view !== 'Payments' && units.map(u => <tr key={u.id}>
-          <td>{u.unitNumber}</td><td>{u.type}</td><td>{`${currentSociety.name.split(' ')[0]} Block ${u.block}`}</td><td><Status>{u.occupancy}</Status></td><td><strong>{fmt(u.monthlyCharge)}</strong></td>
-          <td className="row-actions">
-            {u.occupancy === 'Occupied' && <button className="action-btn action-pay" title="Record Payment" onClick={() => open('payment')}><CircleDollarSign size={13} /></button>}
-            <button className="action-btn action-view" title="View Details"><FileText size={13} /></button>
-            <button className="action-btn action-delete" title="Delete" onClick={() => handleDeleteUnit(u.id, u.unitNumber)}><X size={13} /></button>
-          </td>
-        </tr>)}
+        {view !== 'Residents' && view !== 'Payments' && units.map(u => {
+          const resident = residents.find(r => r.unitNumber === u.unitNumber)
+          const unitInvoices = ctxInvoices.filter(i => i.unitNumber === u.unitNumber)
+          const unpaidInvoice = unitInvoices.find(i => i.outstanding > 0 && i.status !== 'Paid')
+          const arrears = unpaidInvoice ? unpaidInvoice.outstanding : 0
+          const totalDue = u.monthlyCharge + arrears
+          const invoiceStatus = unpaidInvoice?.status ?? (u.occupancy === 'Vacant' ? 'Vacant' : 'Paid')
+          return <tr key={u.id}>
+            <td>{u.unitNumber}</td><td><strong>{resident?.name ?? u.ownerName ?? '—'}</strong></td><td>{`${currentSociety.name.split(' ')[0]} Block ${u.block}`}</td><td><Status>{invoiceStatus}</Status></td><td><strong>{fmt(u.monthlyCharge)}</strong></td><td>{arrears > 0 ? <strong>{fmt(arrears)}</strong> : '—'}</td><td><strong>{fmt(totalDue)}</strong></td>
+            <td className="row-actions">
+              {u.occupancy === 'Occupied' && <button className="action-btn action-pay" title="Record Payment" onClick={() => open('payment')}><CircleDollarSign size={13} /></button>}
+              <button className="action-btn action-edit" title="Edit property" onClick={() => onEditUnit(u.id)}><Pencil size={13} /></button>
+              <button className="action-btn action-delete" title="Delete" onClick={() => handleDeleteUnit(u.id, u.unitNumber)}><X size={13} /></button>
+            </td>
+          </tr>
+        })}
       </tbody></table></div>
     </section></>
 }
