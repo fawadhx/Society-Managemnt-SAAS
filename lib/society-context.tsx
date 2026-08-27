@@ -70,6 +70,7 @@ export type Society = {
   id: string
   name: string
   address: string
+  tier?: SubscriptionTier
 }
 
 /* ── Subscription tiers ─────────────────────────────────── */
@@ -94,7 +95,7 @@ export type SocietyActions = {
   addUnit: (unitNumber: string, block: string, monthlyCharge?: number) => void
   updateUnit: (unitId: string, updates: { unitNumber?: string; block?: string; occupancy?: 'Occupied' | 'Vacant'; monthlyCharge?: number }) => void
   assignResident: (unitNumber: string, residentName: string, phone: string, opts?: { email?: string; securityDeposit?: number; advanceRent?: number }) => void
-  updateResident: (unitNumber: string, updates: { name?: string; phone?: string; occupancy?: 'Occupied' | 'Vacant' }) => void
+  updateResident: (unitNumber: string, updates: { name?: string; phone?: string; occupancy?: 'Occupied' | 'Vacant'; status?: Resident['status'] }) => void
   deleteUnit: (unitId: string) => Promise<void>
   deletePayment: (paymentId: string) => Promise<void>
   deleteSociety: (societyId: string) => Promise<void>
@@ -162,6 +163,53 @@ function fmtDateISO(d: Date) {
   return d.toISOString().slice(0, 10)
 }
 
+/* ── LocalStorage persistence helpers ───────────────────── */
+
+const LS_PREFIX = 'freebuff_society_'
+const LS_KEYS = {
+  societies: `${LS_PREFIX}societies`,
+  currentSocietyId: `${LS_PREFIX}currentSocietyId`,
+  adminName: `${LS_PREFIX}adminName`,
+  units: (sid: string) => `${LS_PREFIX}units_${sid}`,
+  residents: (sid: string) => `${LS_PREFIX}residents_${sid}`,
+  invoices: (sid: string) => `${LS_PREFIX}invoices_${sid}`,
+  payments: (sid: string) => `${LS_PREFIX}payments_${sid}`,
+  auditLogs: (sid: string) => `${LS_PREFIX}auditLogs_${sid}`,
+}
+
+function lsLoad<T>(key: string, fallback: T): T {
+  if (typeof window === 'undefined') return fallback
+  try {
+    const raw = localStorage.getItem(key)
+    return raw ? JSON.parse(raw) as T : fallback
+  } catch {
+    return fallback
+  }
+}
+
+function lsSave(key: string, value: unknown) {
+  if (typeof window === 'undefined') return
+  try {
+    localStorage.setItem(key, JSON.stringify(value))
+  } catch {
+    // localStorage full or blocked — silently ignore.
+  }
+}
+
+function lsSaveSocietyData(societyId: string, data: {
+  units: Unit[]
+  residents: Resident[]
+  invoices: Invoice[]
+  payments: PaymentRecord[]
+  auditLogs: AuditLog[]
+}) {
+  lsSave(LS_KEYS.units(societyId), data.units)
+  lsSave(LS_KEYS.residents(societyId), data.residents)
+  lsSave(LS_KEYS.invoices(societyId), data.invoices)
+  lsSave(LS_KEYS.payments(societyId), data.payments)
+  lsSave(LS_KEYS.auditLogs(societyId), data.auditLogs)
+}
+
 /** Append a row to the audit_logs table (TIER_3 only). */
 async function writeAudit(societyId: string, action: string, metadata: Record<string, unknown> = {}) {
   const sb = getSupabase()
@@ -178,79 +226,56 @@ async function writeAudit(societyId: string, action: string, metadata: Record<st
   }
 }
 
-/* ── Initial mock data (used when Supabase is not configured) */
+/* SSR-safe: read LS on client, return fallback on server (avoids hydration mismatch) */
+function lsOrFallback<T>(key: string, fallback: T): T {
+  if (typeof window === 'undefined') return fallback
+  return lsLoad(key, fallback)
+}
 
-const today = new Date()
+/*
+ * No hardcoded mock data. All initial state is derived from localStorage
+ * (or Supabase). On a fresh install with no stored data, the app starts
+ * with a single blank society and empty arrays.
+ */
 
-const initialUnits: Unit[] = [
-  { id: 'u1', unitNumber: 'A-101', type: 'Apartment', block: 'A', occupancy: 'Occupied', monthlyCharge: 12500 },
-  { id: 'u2', unitNumber: 'A-102', type: 'Apartment', block: 'A', occupancy: 'Occupied', monthlyCharge: 12500 },
-  { id: 'u3', unitNumber: 'A-103', type: 'Apartment', block: 'A', occupancy: 'Occupied', monthlyCharge: 12500 },
-  { id: 'u4', unitNumber: 'B-204', type: 'Apartment', block: 'B', occupancy: 'Occupied', monthlyCharge: 12500 },
-  { id: 'u5', unitNumber: 'B-205', type: 'Apartment', block: 'B', occupancy: 'Occupied', monthlyCharge: 12500 },
-  { id: 'u6', unitNumber: 'C-301', type: 'Apartment', block: 'C', occupancy: 'Vacant', monthlyCharge: 12500 },
-  { id: 'u7', unitNumber: 'C-304', type: 'Apartment', block: 'C', occupancy: 'Occupied', monthlyCharge: 12500 },
-]
-
-const initialResidents: Resident[] = [
-  { id: 'r1', name: 'Ahmed Raza', unitNumber: 'A-101', phone: '0300 1234567', outstandingBalance: 0, status: 'Paid' },
-  { id: 'r2', name: 'Fatima Khan', unitNumber: 'A-102', phone: '0312 5550142', outstandingBalance: 12500, status: 'Overdue' },
-  { id: 'r3', name: 'Usman Tariq', unitNumber: 'A-103', phone: '0333 8211004', outstandingBalance: 0, status: 'Paid' },
-  { id: 'r4', name: 'Sana Iqbal', unitNumber: 'B-204', phone: '0301 4412233', outstandingBalance: 4500, status: 'Partial' },
-  { id: 'r5', name: 'Hassan Ali', unitNumber: 'B-205', phone: '0321 7789001', outstandingBalance: 8000, status: 'Overdue' },
-  { id: 'r6', name: 'Bilal Shah', unitNumber: 'C-301', phone: '0300 5551234', outstandingBalance: 0, status: 'Paid' },
-  { id: 'r7', name: 'Mariam Noor', unitNumber: 'C-304', phone: '0311 9990876', outstandingBalance: 4500, status: 'Overdue' },
-]
-
-const initialInvoices: Invoice[] = [
-  { id: 'inv1', unitNumber: 'A-101', residentName: 'Ahmed Raza', amount: 12500, outstanding: 0, period: 'Aug 2026', status: 'Paid', dueDate: '10 Aug 2026' },
-  { id: 'inv2', unitNumber: 'A-102', residentName: 'Fatima Khan', amount: 12500, outstanding: 12500, period: 'Aug 2026', status: 'Overdue', dueDate: '10 Aug 2026' },
-  { id: 'inv3', unitNumber: 'A-103', residentName: 'Usman Tariq', amount: 12500, outstanding: 0, period: 'Aug 2026', status: 'Paid', dueDate: '10 Aug 2026' },
-  { id: 'inv4', unitNumber: 'B-204', residentName: 'Sana Iqbal', amount: 12500, outstanding: 4500, period: 'Aug 2026', status: 'Partial', dueDate: '10 Aug 2026' },
-  { id: 'inv5', unitNumber: 'B-205', residentName: 'Hassan Ali', amount: 12500, outstanding: 8000, period: 'Aug 2026', status: 'Overdue', dueDate: '10 Aug 2026' },
-  { id: 'inv6', unitNumber: 'C-301', residentName: 'Bilal Shah', amount: 12500, outstanding: 0, period: 'Aug 2026', status: 'Paid', dueDate: '10 Aug 2026' },
-  { id: 'inv7', unitNumber: 'C-304', residentName: 'Mariam Noor', amount: 12500, outstanding: 4500, period: 'Aug 2026', status: 'Overdue', dueDate: '10 Aug 2026' },
-]
-
-const initialPayments: PaymentRecord[] = [
-  { id: 'p1', receiptId: 'REC-1048', residentName: 'Ahmed Raza', unitNumber: 'A-101', amount: 12500, date: '20 Aug 2026', method: 'Bank transfer' },
-  { id: 'p2', receiptId: 'REC-1047', residentName: 'Usman Tariq', unitNumber: 'A-103', amount: 12500, date: '19 Aug 2026', method: 'JazzCash' },
-  { id: 'p3', receiptId: 'REC-1046', residentName: 'Sana Iqbal', unitNumber: 'B-204', amount: 8000, date: '18 Aug 2026', method: 'Cash' },
-  { id: 'p4', receiptId: 'REC-1045', residentName: 'Bilal Shah', unitNumber: 'C-301', amount: 12500, date: '17 Aug 2026', method: 'Bank transfer' },
-]
-
-const initialSocieties: Society[] = [
-  { id: '1', name: 'Green Valley Housing Society', address: 'Green Valley, Lahore' },
-  { id: '2', name: 'DHA Phase 6 Apartments', address: 'DHA Phase 6, Lahore' },
-]
-
-const initialCurrentSociety: Society = initialSocieties[0]
-
-const initialAuditLogs: AuditLog[] = []
-
-const initialOverdue: OverdueResident[] = [
-  { id: 'or1', name: 'Fatima Khan', unitNumber: 'A-102', balance: 12500, daysOverdue: 5, lastReminderDate: '15 Aug 2026' },
-  { id: 'or2', name: 'Hassan Ali', unitNumber: 'B-205', balance: 8000, daysOverdue: 8, lastReminderDate: '14 Aug 2026' },
-  { id: 'or3', name: 'Sana Iqbal', unitNumber: 'B-204', balance: 4500, daysOverdue: 3, lastReminderDate: '17 Aug 2026' },
-  { id: 'or4', name: 'Mariam Noor', unitNumber: 'C-304', balance: 4500, daysOverdue: 12, lastReminderDate: '10 Aug 2026' },
-]
+const BLANK_SOCIETY: Society = { id: '_blank', name: '', address: '', tier: 'TIER_1' }
 
 /* ── Provider ───────────────────────────────────────────── */
 
-let nextPaymentNum = 1049
-let nextInvoiceNum = 8
+let nextPaymentNum = 1000
+let nextInvoiceNum = 1
 
 export function SocietyProvider({ children }: { children: React.ReactNode }) {
-  const [units, setUnits] = useState<Unit[]>(initialUnits)
-  const [residents, setResidents] = useState<Resident[]>(initialResidents)
-  const [invoices, setInvoices] = useState<Invoice[]>(initialInvoices)
-  const [payments, setPayments] = useState<PaymentRecord[]>(initialPayments)
-  const [overdueResidents, setOverdueResidents] = useState<OverdueResident[]>(initialOverdue)
-  const [auditLogs, setAuditLogs] = useState<AuditLog[]>(initialAuditLogs)
-  const [societies, setSocieties] = useState<Society[]>(initialSocieties)
-  const [currentSociety, setCurrentSociety] = useState<Society>(initialCurrentSociety)
-  const [currentTier, setCurrentTier] = useState<SubscriptionTier>('TIER_3')
-  const [adminName, setAdminName] = useState('Arham Raza')
+  /*
+   * Lazy initializers read localStorage synchronously during the first render
+   * so state is populated from the very first paint (no flash of defaults).
+   * An isMounted ref prevents the persist useEffect from overwriting localStorage
+   * on that same initial render — writes only happen on subsequent state changes.
+   */
+  /* lsOrFallback reads LS on client, returns fallback on server — consistent, no flash. */
+  const [societies, setSocieties] = useState<Society[]>(() =>
+    lsOrFallback<Society[]>(LS_KEYS.societies, []))
+  const [currentSociety, setCurrentSociety] = useState<Society>(() => {
+    const savedSocieties = lsOrFallback<Society[]>(LS_KEYS.societies, [])
+    if (savedSocieties.length === 0) return BLANK_SOCIETY
+    const savedId = lsOrFallback<string>(LS_KEYS.currentSocietyId, savedSocieties[0].id)
+    return savedSocieties.find(s => s.id === savedId) || savedSocieties[0]
+  })
+  const [currentTier, setCurrentTier] = useState<SubscriptionTier>(() => {
+    if (SB) return 'TIER_3'
+    const savedSocieties = lsOrFallback<Society[]>(LS_KEYS.societies, [])
+    if (savedSocieties.length === 0) return 'TIER_1'
+    const savedId = lsOrFallback<string>(LS_KEYS.currentSocietyId, savedSocieties[0].id)
+    const active = savedSocieties.find(s => s.id === savedId) || savedSocieties[0]
+    return active?.tier ?? 'TIER_1'
+  })
+  const [units, setUnits] = useState<Unit[]>(() => lsOrFallback(LS_KEYS.units(currentSociety.id), []))
+  const [residents, setResidents] = useState<Resident[]>(() => lsOrFallback(LS_KEYS.residents(currentSociety.id), []))
+  const [invoices, setInvoices] = useState<Invoice[]>(() => lsOrFallback(LS_KEYS.invoices(currentSociety.id), []))
+  const [payments, setPayments] = useState<PaymentRecord[]>(() => lsOrFallback(LS_KEYS.payments(currentSociety.id), []))
+  const [overdueResidents, setOverdueResidents] = useState<OverdueResident[]>([])
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>(() => lsOrFallback(LS_KEYS.auditLogs(currentSociety.id), []))
+  const [adminName, setAdminName] = useState(() => SB ? 'Arham Raza' : lsLoad<string>(LS_KEYS.adminName, 'Arham Raza'))
   const [loading, setLoading] = useState(SB)
 
   // Refs to access current state inside callbacks without re-triggering useMemo
@@ -258,10 +283,25 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
   const residentsRef = useRef(residents)
   const overdueRef = useRef(overdueResidents)
   const invoicesRef = useRef(invoices)
+  const isMounted = useRef(false)
   unitsRef.current = units
   residentsRef.current = residents
   overdueRef.current = overdueResidents
   invoicesRef.current = invoices
+
+  /* ── Mark as mounted after first render completes ────── */
+  useEffect(() => {
+    isMounted.current = true
+  }, [])
+
+  /* ── LocalStorage: persist state changes ──────────────── */
+  useEffect(() => {
+    if (!isMounted.current || SB) return // Skip initial render; Supabase handles its own persistence
+    lsSave(LS_KEYS.societies, societies)
+    lsSave(LS_KEYS.currentSocietyId, currentSociety.id)
+    lsSave(LS_KEYS.adminName, adminName)
+    lsSaveSocietyData(currentSociety.id, { units, residents, invoices, payments, auditLogs })
+  }, [units, residents, invoices, payments, auditLogs, societies, currentSociety, currentTier, adminName])
 
   /* ── Supabase: fetch initial data ──────────────────────── */
 
@@ -280,6 +320,7 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
         if (cancelled) return
         const dbSocieties: Society[] = (allSocieties ?? []).map((s: Record<string, unknown>) => ({
           id: s.id as string, name: s.name as string, address: (s.address as string) ?? '',
+          tier: (s.tier as SubscriptionTier) ?? 'TIER_1',
         }))
         if (dbSocieties.length > 0) {
           setSocieties(dbSocieties)
@@ -423,7 +464,19 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
     return () => { cancelled = true }
   }, [])
 
-  const setTier = useCallback((t: SubscriptionTier) => setCurrentTier(t), [])
+  const setTier = useCallback((t: SubscriptionTier) => {
+    setCurrentTier(t)
+    // Update the tier on the society model itself (persisted via societies LS key)
+    const updateSocieties = (prev: Society[]) => prev.map(s =>
+      s.id === currentSociety.id ? { ...s, tier: t } : s)
+    setSocieties(updateSocieties)
+    setCurrentSociety(prev => ({ ...prev, tier: t }))
+    // Persist the updated societies array to LS so tier survives refresh
+    if (!SB) {
+      const updated = updateSocieties(societies)
+      lsSave(LS_KEYS.societies, updated)
+    }
+  }, [currentSociety.id, societies])
 
   /* ── fetchSocietyData: load all data for a given society ── */
   const fetchSocietyData = useCallback(async (societyId: string) => {
@@ -513,31 +566,41 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
     const target = societies.find(s => s.id === societyId)
     if (!target) return
     setCurrentSociety(target)
+
+    // Immediately sync active society ID to localStorage so a refresh
+    // will load the correct society on next mount.
+    if (!SB) lsSave(LS_KEYS.currentSocietyId, societyId)
+
+    // Apply the tier stored on the society model (no separate LS key needed)
+    setCurrentTier(target.tier ?? 'TIER_1')
+
     if (SB) {
       await fetchSocietyData(societyId)
     } else {
-      // Mock mode: only society '1' has data, clear for others
-      if (societyId !== '1') {
-        setUnits([])
-        setResidents([])
-        setInvoices([])
-        setPayments([])
-        setOverdueResidents([])
-        setAuditLogs([])
-      } else {
-        setUnits(initialUnits)
-        setResidents(initialResidents)
-        setInvoices(initialInvoices)
-        setPayments(initialPayments)
-        setOverdueResidents(initialOverdue)
-      }
+      // Mock mode: load from localStorage if available, else clear
+      const lsUnits = lsLoad<Unit[]>(LS_KEYS.units(societyId), [])
+      const lsResidents = lsLoad<Resident[]>(LS_KEYS.residents(societyId), [])
+      const lsInvoices = lsLoad<Invoice[]>(LS_KEYS.invoices(societyId), [])
+      const lsPayments = lsLoad<PaymentRecord[]>(LS_KEYS.payments(societyId), [])
+      const lsAuditLogs = lsLoad<AuditLog[]>(LS_KEYS.auditLogs(societyId), [])
+
+      setUnits(lsUnits.length > 0 ? lsUnits : [])
+      setResidents(lsResidents.length > 0 ? lsResidents : [])
+      setInvoices(lsInvoices.length > 0 ? lsInvoices : [])
+      setPayments(lsPayments.length > 0 ? lsPayments : [])
+      setOverdueResidents([])
+      setAuditLogs(lsAuditLogs.length > 0 ? lsAuditLogs : [])
     }
   }, [societies, fetchSocietyData])
 
   /* ── addSociety: create a new society locally (+ Supabase if configured) ── */
   const addSociety = useCallback(async (name: string, address: string) => {
-    const newSociety: Society = { id: `s${Date.now()}`, name, address }
-    setSocieties(prev => [...prev, newSociety])
+    const newSociety: Society = { id: `s${Date.now()}`, name, address, tier: 'TIER_1' }
+    setSocieties(prev => {
+      const updated = [...prev, newSociety]
+      if (!SB) lsSave(LS_KEYS.societies, updated)
+      return updated
+    })
 
     if (SB) {
       try {
@@ -574,7 +637,9 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
       societyId,
     }
 
-    setUnits(prev => [...prev, newUnit])
+    const newUnits = [...unitsRef.current, newUnit]
+    setUnits(newUnits)
+    if (!SB) lsSave(LS_KEYS.units(currentSociety.id), newUnits)
 
     if (canAccessAuditLogs) {
       setAuditLogs(prev => [{
@@ -646,7 +711,9 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
     const advRent = opts?.advanceRent ?? 0
 
     // Update unit to Occupied with owner info
-    setUnits(prev => prev.map(u => u.unitNumber === unitNumber ? { ...u, occupancy: 'Occupied', ownerName: displayName, phone: displayPhone } : u))
+    const updatedUnits: Unit[] = unitsRef.current.map(u => u.unitNumber === unitNumber ? { ...u, occupancy: 'Occupied' as const, ownerName: displayName, phone: displayPhone } : u)
+    setUnits(updatedUnits)
+    if (!SB) lsSave(LS_KEYS.units(currentSociety.id), updatedUnits)
 
     // Add resident record — defaults to Pending (no payment made yet)
     setResidents(prev => [...prev, {
@@ -699,14 +766,21 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
   }, [currentSociety, canAccessAuditLogs])
 
   /* ── updateResident: edit resident details + occupancy ── */
-  const updateResident = useCallback((unitNumber: string, updates: { name?: string; phone?: string; occupancy?: 'Occupied' | 'Vacant' }) => {
+  const updateResident = useCallback((unitNumber: string, updates: { name?: string; phone?: string; occupancy?: 'Occupied' | 'Vacant'; status?: Resident['status'] }) => {
     // Update the resident record
-    if (updates.name || updates.phone) {
-      setResidents(prev => prev.map(r => r.unitNumber === unitNumber ? {
-        ...r,
-        ...(updates.name ? { name: updates.name } : {}),
-        ...(updates.phone ? { phone: updates.phone } : {}),
-      } : r))
+    setResidents(prev => prev.map(r => r.unitNumber === unitNumber ? {
+      ...r,
+      ...(updates.name ? { name: updates.name } : {}),
+      ...(updates.phone ? { phone: updates.phone } : {}),
+      ...(updates.status ? { status: updates.status } : {}),
+    } : r))
+
+    // Sync status to matching invoices so Residents and Billing tables agree
+    if (updates.status) {
+      setInvoices(prev => prev.map(i => {
+        if (i.unitNumber !== unitNumber) return i
+        return { ...i, status: updates.status as Invoice['status'] }
+      }))
     }
 
     // If occupancy is changing to Vacant, clear the resident entirely
@@ -715,13 +789,15 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
     }
 
     // Also update the unit
-    setUnits(prev => prev.map(u => u.unitNumber === unitNumber ? {
+    const updatedUnits: Unit[] = unitsRef.current.map(u => u.unitNumber === unitNumber ? {
       ...u,
       ...(updates.occupancy ? { occupancy: updates.occupancy } : {}),
       ...(updates.name ? { ownerName: updates.name } : {}),
       ...(updates.phone ? { phone: updates.phone } : {}),
       ...(updates.occupancy === 'Vacant' ? { ownerName: undefined, phone: undefined } : {}),
-    } : u))
+    } : u)
+    setUnits(updatedUnits)
+    if (!SB) lsSave(LS_KEYS.units(currentSociety.id), updatedUnits)
 
     if (SB) {
       (async () => {
@@ -849,11 +925,17 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
     // Local state: remove society and switch to first remaining
     const remaining = societies.filter(s => s.id !== societyId)
     setSocieties(remaining)
+    if (!SB) lsSave(LS_KEYS.societies, remaining)
 
     // If deleting the active society, switch to the first remaining
     if (currentSociety.id === societyId) {
       const fallback = remaining[0]
       setCurrentSociety(fallback)
+      // Load fallback's tier and data
+      if (!SB) {
+        lsSave(LS_KEYS.currentSocietyId, fallback.id)
+        setCurrentTier(fallback.tier ?? 'TIER_1')
+      }
       // Clear data since we're switching away
       setUnits([])
       setResidents([])
@@ -861,6 +943,16 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
       setPayments([])
       setOverdueResidents([])
       setAuditLogs([])
+    }
+    // Clean up localStorage for the deleted society
+    if (!SB) {
+      try {
+        localStorage.removeItem(LS_KEYS.units(societyId))
+        localStorage.removeItem(LS_KEYS.residents(societyId))
+        localStorage.removeItem(LS_KEYS.invoices(societyId))
+        localStorage.removeItem(LS_KEYS.payments(societyId))
+        localStorage.removeItem(LS_KEYS.auditLogs(societyId))
+      } catch { /* best-effort cleanup */ }
     }
 
     // Supabase persist
@@ -949,8 +1041,7 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
 
   const recordPayment = useCallback(async (invoiceId: string, amount: number, method: string, dateOverride?: string) => {
     // --- Local state update (always, serves as optimistic update) ---
-    const currentInvoices = unitsRef.current.length ? invoices : initialInvoices
-    const inv = currentInvoices.find(i => i.id === invoiceId)
+    const inv = invoices.find(i => i.id === invoiceId)
 
     setInvoices(prev => prev.map(i => {
       if (i.id !== invoiceId) return i
@@ -1084,14 +1175,14 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
   /* ── generateMonthlyInvoices ───────────────────────────── */
 
   const generateMonthlyInvoices = useCallback(async (period: string, defaultAmount: number, dueDateOverride?: string) => {
-    const activeUnits = (unitsRef.current.length ? unitsRef.current : initialUnits).filter(u => u.occupancy === 'Occupied')
-    const currentResidents = residentsRef.current.length ? residentsRef.current : initialResidents
+    const activeUnits = unitsRef.current.filter(u => u.occupancy === 'Occupied')
+    const currentResidents = residentsRef.current
     const currentOverdue = overdueRef.current
     const dueDate = dueDateOverride || `10 ${period}`
 
     // --- Local state update ---
     // Calculate arrears: sum of unpaid balance from previous invoices per unit
-    const currentInvoices = invoicesRef.current.length ? invoicesRef.current : initialInvoices
+    const currentInvoices = invoicesRef.current
     const arrearsMap = new Map<string, number>()
     for (const inv of currentInvoices) {
       if (inv.outstanding > 0 && inv.status !== 'Paid') {

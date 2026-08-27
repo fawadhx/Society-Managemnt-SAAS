@@ -145,6 +145,7 @@ function EditResidentModal({ unitNumber, close, onSuccess }: { unitNumber: strin
   const [name, setName] = useState(resident?.name ?? '')
   const [phone, setPhone] = useState(resident?.phone ?? '')
   const [occupancy, setOccupancy] = useState<'Occupied' | 'Vacant'>('Occupied')
+  const [status, setStatus] = useState<import('@/lib/society-context').Resident['status']>(resident?.status ?? 'Pending')
 
   const handleSubmit = () => {
     if (!name.trim()) return
@@ -152,6 +153,7 @@ function EditResidentModal({ unitNumber, close, onSuccess }: { unitNumber: strin
       name: name.trim(),
       phone: phone.trim(),
       occupancy,
+      status,
     })
     onSuccess(occupancy === 'Vacant' ? `Resident removed from ${unitNumber} — unit now Vacant` : `${name.trim()} updated for ${unitNumber}`)
   }
@@ -162,6 +164,7 @@ function EditResidentModal({ unitNumber, close, onSuccess }: { unitNumber: strin
       <label>Resident name <input value={name} onChange={e => setName(e.target.value)} /></label>
       <label>Phone number <input value={phone} onChange={e => setPhone(e.target.value)} placeholder="e.g. 0300 1234567" /></label>
       <label>Unit status <select value={occupancy} onChange={e => setOccupancy(e.target.value as 'Occupied' | 'Vacant')}><option value="Occupied">Occupied</option><option value="Vacant">Vacant (remove resident)</option></select></label>
+      <label>Payment / Account Status <select value={status} onChange={e => setStatus(e.target.value as import('@/lib/society-context').Resident['status'])}><option value="Pending">Pending</option><option value="Paid">Paid</option><option value="Partial">Partial</option><option value="Overdue">Overdue</option></select></label>
     </div>
     <div className="modal-actions">
       <Button variant="outline" onClick={close}>Cancel</Button>
@@ -445,7 +448,8 @@ function SectionView({ view, query, filteredResidentRows, paymentRows, open, not
       <div className="table-scroll"><table><thead><tr>
         {view === 'Residents' && <><th>Unit</th><th>Resident</th><th>Phone</th><th>Outstanding</th><th>Status</th><th>Actions</th></>}
         {view === 'Payments' && <><th>Receipt</th><th>Resident</th><th>Unit</th><th>Amount</th><th>Date</th><th>Method</th><th>Actions</th></>}
-        {view !== 'Residents' && view !== 'Payments' && <><th>Unit</th><th>Resident</th><th>Location</th><th>Status</th><th>Monthly Charge</th><th>Arrears</th><th>Total Due</th><th>Actions</th></>}
+        {view === 'Properties' && <><th>Unit</th><th>Type</th><th>Location / Block</th><th>Occupancy</th><th>Monthly Charge</th><th>Actions</th></>}
+        {view === 'Billing' && <><th>Unit</th><th>Resident</th><th>Status</th><th>Monthly Charge</th><th>Arrears</th><th>Total Paid</th><th>Remaining Dues</th><th>Actions</th></>}
       </tr></thead><tbody>
         {view === 'Residents' && filteredResidentRows.map(row => {
           const resident = residents.find(r => r.unitNumber === row[0])
@@ -466,19 +470,31 @@ function SectionView({ view, query, filteredResidentRows, paymentRows, open, not
             <button className="action-btn action-delete" title="Delete" onClick={() => handleDeletePayment(p.id, p.receiptId)}><X size={13} /></button>
           </td>
         </tr>)}
-        {view !== 'Residents' && view !== 'Payments' && units.map(u => {
+        {view === 'Properties' && units.map(u => {
+          return <tr key={u.id}>
+            <td>{u.unitNumber}</td><td>{u.type}</td><td>{`${currentSociety.name.split(' ')[0]} Block ${u.block}`}</td><td><Status>{u.occupancy}</Status></td><td><strong>{fmt(u.monthlyCharge)}</strong></td>
+            <td className="row-actions">
+              <button className="action-btn action-edit" title="Edit property" onClick={() => onEditUnit(u.id)}><Pencil size={13} /></button>
+              <button className="action-btn action-delete" title="Delete" onClick={() => handleDeleteUnit(u.id, u.unitNumber)}><X size={13} /></button>
+            </td>
+          </tr>
+        })}
+        {view === 'Billing' && units.filter(u => u.occupancy === 'Occupied').map(u => {
           const resident = residents.find(r => r.unitNumber === u.unitNumber)
           const unitInvoices = ctxInvoices.filter(i => i.unitNumber === u.unitNumber)
           const unpaidInvoice = unitInvoices.find(i => i.outstanding > 0 && i.status !== 'Paid')
+          const latestInvoice = unitInvoices[0]
           const arrears = unpaidInvoice ? unpaidInvoice.outstanding : 0
           const totalDue = u.monthlyCharge + arrears
-          const invoiceStatus = unpaidInvoice?.status ?? (u.occupancy === 'Vacant' ? 'Vacant' : 'Paid')
+          const totalPaid = unitInvoices.reduce((sum, i) => sum + (i.amount - i.outstanding), 0)
+          const remainingDues = Math.max(0, totalDue - totalPaid)
+          const hasPaidInvoice = unitInvoices.some(i => i.status === 'Paid')
+          const invoiceStatus = unpaidInvoice?.status ?? (hasPaidInvoice ? 'Paid' : 'Pending')
+          const duesCleared = remainingDues === 0 && totalPaid > 0
           return <tr key={u.id}>
-            <td>{u.unitNumber}</td><td><strong>{resident?.name ?? u.ownerName ?? '—'}</strong></td><td>{`${currentSociety.name.split(' ')[0]} Block ${u.block}`}</td><td><Status>{invoiceStatus}</Status></td><td><strong>{fmt(u.monthlyCharge)}</strong></td><td>{arrears > 0 ? <strong>{fmt(arrears)}</strong> : '—'}</td><td><strong>{fmt(totalDue)}</strong></td>
+            <td>{u.unitNumber}</td><td><strong>{resident?.name ?? u.ownerName ?? '—'}</strong></td><td><Status>{invoiceStatus}</Status></td><td><strong>{fmt(u.monthlyCharge)}</strong></td><td>{arrears > 0 ? <strong>{fmt(arrears)}</strong> : '—'}</td><td><strong>{fmt(totalPaid)}</strong></td><td>{duesCleared ? <span className="status status-paid"><span className="status-dot" />✓ Dues Cleared</span> : <strong style={{ color: 'var(--danger)' }}>{fmt(remainingDues)}</strong>}</td>
             <td className="row-actions">
-              {u.occupancy === 'Occupied' && <button className="action-btn action-pay" title="Record Payment" onClick={() => open('payment')}><CircleDollarSign size={13} /></button>}
-              <button className="action-btn action-edit" title="Edit property" onClick={() => onEditUnit(u.id)}><Pencil size={13} /></button>
-              <button className="action-btn action-delete" title="Delete" onClick={() => handleDeleteUnit(u.id, u.unitNumber)}><X size={13} /></button>
+              <button className="action-btn action-pay" title="Record Payment" onClick={() => open('payment')}><CircleDollarSign size={13} /></button>
             </td>
           </tr>
         })}
