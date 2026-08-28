@@ -452,9 +452,8 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
         setPayments(dbPayments)
         setOverdueResidents(dbOverdue)
         setAuditLogs(dbAuditLogs)
-      } catch (err) {
-        console.error('[SocietyProvider] Failed to fetch Supabase data:', err)
-        // Fall back silently to the mock data already in state
+      } catch {
+        // Supabase query failed — fall back silently to whatever is in state
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -480,14 +479,41 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
 
   /* ── fetchSocietyData: load all data for a given society ── */
   const fetchSocietyData = useCallback(async (societyId: string) => {
+    /*
+     * Hydrate every collection from localStorage. Used whenever Supabase is
+     * unavailable, returns 0 records, or throws — the UI is never reset to
+     * empty arrays; the last cached snapshot always wins.
+     */
+    const hydrateFromLocalStorage = () => {
+      setUnits(lsLoad(LS_KEYS.units(societyId), []))
+      setResidents(lsLoad(LS_KEYS.residents(societyId), []))
+      setInvoices(lsLoad(LS_KEYS.invoices(societyId), []))
+      setPayments(lsLoad(LS_KEYS.payments(societyId), []))
+      setAuditLogs(lsLoad(LS_KEYS.auditLogs(societyId), []))
+      setOverdueResidents([])
+    }
+
     const sb = getSupabase()
-    if (!sb) return
+    if (!sb) {
+      // No Supabase — load everything from localStorage
+      hydrateFromLocalStorage()
+      return
+    }
     try {
-      const { data: society } = await sb.from('societies').select('*').eq('id', societyId).single()
-      if (!society) return
+      const { data: society, error: societyErr } = await sb.from('societies').select('*').eq('id', societyId).single()
+      if (!society || societyErr) {
+        // 0 records or query failed — hydrate from localStorage, never wipe state
+        hydrateFromLocalStorage()
+        return
+      }
       setCurrentTier(society.tier as SubscriptionTier)
 
-      const { data: unitsData } = await sb.from('units').select('*').eq('society_id', societyId)
+      const { data: unitsData, error: unitsErr } = await sb.from('units').select('*').eq('society_id', societyId)
+      if (unitsErr || !unitsData || unitsData.length === 0) {
+        // 0 units or a failed query — hydrate from localStorage immediately
+        hydrateFromLocalStorage()
+        return
+      }
       const dbUnits: Unit[] = (unitsData ?? []).map((u: Record<string, unknown>) => ({
         id: u.id as string, unitNumber: u.unit_number as string, type: 'Apartment',
         block: (u.unit_number as string).split('-')[0] ?? 'A',
@@ -539,25 +565,28 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
         dbAuditLogs = (logsData ?? []).map((l: Record<string, unknown>) => ({ id: l.id as string, action: l.action as string, performedBy: l.performed_by as string, metadata: (typeof l.metadata === 'object' && l.metadata !== null ? l.metadata : {}) as Record<string, unknown>, timestamp: l.timestamp as string }))
       }
 
+      // Commit Supabase data + cache to localStorage for future fallbacks
       setUnits(dbUnits)
       setResidents(dbResidents)
       setInvoices(dbInvoices)
       setPayments(dbPayments)
       setOverdueResidents(dbOverdue)
       setAuditLogs(dbAuditLogs)
-    } catch (err) {
-      console.error('[fetchSocietyData] Failed:', err)
+      lsSaveSocietyData(societyId, { units: dbUnits, residents: dbResidents, invoices: dbInvoices, payments: dbPayments, auditLogs: dbAuditLogs })
+    } catch {
+      // Total failure — hydrate from localStorage so the UI is never blank
+      hydrateFromLocalStorage()
     }
   }, [])
 
   /* ── refreshData: re-fetch everything from Supabase ── */
   const refreshData = useCallback(async () => {
-    if (!SB) return
+    if (!SB || !isSupabaseConfigured()) return
     try {
       const targetId = currentSociety.id
       await fetchSocietyData(targetId)
-    } catch (err) {
-      console.error('[refreshData] Failed:', err)
+    } catch {
+      // refreshData failed — state stays as-is
     }
   }, [currentSociety, fetchSocietyData])
 
@@ -569,28 +598,34 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
 
     // Immediately sync active society ID to localStorage so a refresh
     // will load the correct society on next mount.
-    if (!SB) lsSave(LS_KEYS.currentSocietyId, societyId)
+    lsSave(LS_KEYS.currentSocietyId, societyId)
 
     // Apply the tier stored on the society model (no separate LS key needed)
     setCurrentTier(target.tier ?? 'TIER_1')
 
-    if (SB) {
-      await fetchSocietyData(societyId)
-    } else {
-      // Mock mode: load from localStorage if available, else clear
-      const lsUnits = lsLoad<Unit[]>(LS_KEYS.units(societyId), [])
-      const lsResidents = lsLoad<Resident[]>(LS_KEYS.residents(societyId), [])
-      const lsInvoices = lsLoad<Invoice[]>(LS_KEYS.invoices(societyId), [])
-      const lsPayments = lsLoad<PaymentRecord[]>(LS_KEYS.payments(societyId), [])
-      const lsAuditLogs = lsLoad<AuditLog[]>(LS_KEYS.auditLogs(societyId), [])
+    // Load from localStorage as a reliable fallback for both SB and non-SB modes
+    const lsUnits = lsLoad<Unit[]>(LS_KEYS.units(societyId), [])
+    const lsResidents = lsLoad<Resident[]>(LS_KEYS.residents(societyId), [])
+    const lsInvoices = lsLoad<Invoice[]>(LS_KEYS.invoices(societyId), [])
+    const lsPayments = lsLoad<PaymentRecord[]>(LS_KEYS.payments(societyId), [])
+    const lsAuditLogs = lsLoad<AuditLog[]>(LS_KEYS.auditLogs(societyId), [])
 
-      setUnits(lsUnits.length > 0 ? lsUnits : [])
-      setResidents(lsResidents.length > 0 ? lsResidents : [])
-      setInvoices(lsInvoices.length > 0 ? lsInvoices : [])
-      setPayments(lsPayments.length > 0 ? lsPayments : [])
-      setOverdueResidents([])
-      setAuditLogs(lsAuditLogs.length > 0 ? lsAuditLogs : [])
+    if (SB && isSupabaseConfigured()) {
+      try {
+        await fetchSocietyData(societyId)
+        return // fetchSocietyData succeeded — it set state
+      } catch {
+        // Supabase failed — fall through to localStorage below
+      }
     }
+
+    // Non-SB or Supabase failed — load from localStorage
+    setUnits(lsUnits)
+    setResidents(lsResidents)
+    setInvoices(lsInvoices)
+    setPayments(lsPayments)
+    setOverdueResidents([])
+    setAuditLogs(lsAuditLogs)
   }, [societies, fetchSocietyData])
 
   /* ── addSociety: create a new society locally (+ Supabase if configured) ── */
@@ -598,22 +633,23 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
     const newSociety: Society = { id: `s${Date.now()}`, name, address, tier: 'TIER_1' }
     setSocieties(prev => {
       const updated = [...prev, newSociety]
-      if (!SB) lsSave(LS_KEYS.societies, updated)
+      lsSave(LS_KEYS.societies, updated)
       return updated
     })
 
-    if (SB) {
-      try {
-        const sb = getSupabase()
-        if (!sb) return
-        const { data } = await sb.from('societies').insert({ name, address, tier: 'TIER_1', default_fee: 12500 }).select('id').single()
-        if (data) {
-          const realSociety: Society = { id: data.id as string, name, address }
-          setSocieties(prev => prev.map(s => s.id === newSociety.id ? realSociety : s))
-        }
-      } catch (err) {
-        console.error('[addSociety] Supabase persist failed:', err)
+    // Supabase persist — localStorage already saved above, so any failure
+    // here is silently ignored (the local society keeps its temporary id).
+    if (!SB || !isSupabaseConfigured()) return
+    try {
+      const sb = getSupabase()
+      if (!sb) return
+      const { data } = await sb.from('societies').insert({ name, address, tier: 'TIER_1', default_fee: 12500 }).select('id').single()
+      if (data) {
+        const realSociety: Society = { id: data.id as string, name, address }
+        setSocieties(prev => prev.map(s => s.id === newSociety.id ? realSociety : s))
       }
+    } catch {
+      // Silent fallback — localStorage already saved above
     }
   }, [])
 
@@ -639,7 +675,8 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
 
     const newUnits = [...unitsRef.current, newUnit]
     setUnits(newUnits)
-    if (!SB) lsSave(LS_KEYS.units(currentSociety.id), newUnits)
+    // Always persist to localStorage (guarantees local state survives page refresh)
+    lsSave(LS_KEYS.units(currentSociety.id), newUnits)
 
     if (canAccessAuditLogs) {
       setAuditLogs(prev => [{
@@ -651,57 +688,59 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
       }, ...prev])
     }
 
-    if (SB) {
-      (async () => {
-        try {
-          const sb = getSupabase()
-          if (!sb) return
-          const { data, error } = await sb.from('units').insert({
-            society_id: societyId,
-            unit_number: unitNumber,
-            owner_name: null,
-            phone: null,
-            status: 'Vacant',
-          }).select('id').single()
-          if (error) throw error
-          if (data) {
-            setUnits(prev => prev.map(u => u.id === newUnit.id ? { ...u, id: data.id as string } : u))
-          }
-          if (canAccessAuditLogs) await writeAudit(societyId, 'UNIT_CREATED', { unitNumber, block })
-        } catch (err) {
-          console.error('[addUnit] Supabase persist failed:', err)
+    // Supabase persist (fire-and-forget) — the unit was already saved to
+    // localStorage above, so any Supabase failure here is silently ignored.
+    if (!SB || !isSupabaseConfigured()) return
+    void (async () => {
+      try {
+        const sb = getSupabase()
+        if (!sb) return
+        const { data, error } = await sb.from('units').insert({
+          society_id: societyId,
+          unit_number: unitNumber,
+          status: 'Vacant',
+        }).select('id').single()
+        if (error) throw error
+        if (data) {
+          setUnits(prev => prev.map(u => u.id === newUnit.id ? { ...u, id: data.id as string } : u))
         }
-      })()
-    }
+        if (canAccessAuditLogs) await writeAudit(societyId, 'UNIT_CREATED', { unitNumber, block })
+      } catch {
+        // Silent fallback — localStorage already saved above
+      }
+    })()
   }, [currentSociety, canAccessAuditLogs])
 
   /* ── updateUnit: edit property details ─────────────────── */
   const updateUnit = useCallback((unitId: string, updates: { unitNumber?: string; block?: string; occupancy?: 'Occupied' | 'Vacant'; monthlyCharge?: number }) => {
-    setUnits(prev => prev.map(u => u.id === unitId ? { ...u, ...updates } : u))
+    const updated = unitsRef.current.map(u => u.id === unitId ? { ...u, ...updates } : u)
+    setUnits(updated)
+    lsSave(LS_KEYS.units(currentSociety.id), updated)
 
-    if (SB) {
-      (async () => {
-        try {
-          const sb = getSupabase()
-          if (!sb) return
-          const dbUpdates: Record<string, unknown> = {}
-          if (updates.unitNumber) dbUpdates.unit_number = updates.unitNumber
-          if (updates.block) dbUpdates.unit_number = updates.unitNumber // Supabase uses unit_number
-          if (updates.occupancy) dbUpdates.status = updates.occupancy
-          // If marking Vacant, clear owner fields
-          if (updates.occupancy === 'Vacant') {
-            dbUpdates.owner_name = null
-            dbUpdates.phone = null
-          }
-          if (Object.keys(dbUpdates).length > 0) {
-            await sb.from('units').update(dbUpdates).eq('id', unitId)
-          }
-        } catch (err) {
-          console.error('[updateUnit] Supabase persist failed:', err)
+    // Supabase persist (fire-and-forget) — localStorage already saved above,
+    // so any Supabase failure here is silently ignored.
+    if (!SB || !isSupabaseConfigured()) return
+    void (async () => {
+      try {
+        const sb = getSupabase()
+        if (!sb) return
+        const dbUpdates: Record<string, unknown> = {}
+        if (updates.unitNumber) dbUpdates.unit_number = updates.unitNumber
+        if (updates.block) dbUpdates.unit_number = updates.unitNumber
+        if (updates.occupancy) dbUpdates.status = updates.occupancy
+        if (updates.occupancy === 'Vacant') {
+          dbUpdates.owner_name = null
+          dbUpdates.phone = null
         }
-      })()
-    }
-  }, [])
+        if (Object.keys(dbUpdates).length > 0) {
+          await sb.from('units').update(dbUpdates).eq('id', unitId)
+        }
+      } catch {
+        // Silent fallback — localStorage already saved above
+      }
+    })()
+  }, [currentSociety])
+
 
   /* ── assignResident: assign a resident to a Vacant unit ── */
   const assignResident = useCallback((unitNumber: string, residentName: string, phone: string, opts?: { email?: string; securityDeposit?: number; advanceRent?: number }) => {
@@ -713,10 +752,10 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
     // Update unit to Occupied with owner info
     const updatedUnits: Unit[] = unitsRef.current.map(u => u.unitNumber === unitNumber ? { ...u, occupancy: 'Occupied' as const, ownerName: displayName, phone: displayPhone } : u)
     setUnits(updatedUnits)
-    if (!SB) lsSave(LS_KEYS.units(currentSociety.id), updatedUnits)
+    lsSave(LS_KEYS.units(currentSociety.id), updatedUnits)
 
     // Add resident record — defaults to Pending (no payment made yet)
-    setResidents(prev => [...prev, {
+    const newResident: Resident = {
       id: `r-${unitNumber}`,
       name: displayName,
       unitNumber,
@@ -725,7 +764,10 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
       status: 'Pending' as Resident['status'],
       securityDeposit: secDep,
       advanceRent: advRent,
-    }])
+    }
+    const newResidents = [...residentsRef.current, newResident]
+    setResidents(newResidents)
+    lsSave(LS_KEYS.residents(currentSociety.id), newResidents)
 
     if (canAccessAuditLogs) {
       setAuditLogs(prev => [{
@@ -737,55 +779,57 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
       }, ...prev])
     }
 
-    if (SB) {
-      (async () => {
-        try {
-          const sb = getSupabase()
-          if (!sb) return
-          // Find the unit by unit_number and society_id
-          const { data: unitRow } = await sb.from('units')
-            .select('id')
-            .eq('unit_number', unitNumber)
-            .eq('society_id', currentSociety.id)
-            .limit(1).single()
-          if (unitRow) {
-            await sb.from('units').update({
-              owner_name: displayName,
-              phone: displayPhone,
-              status: 'Occupied',
-            }).eq('id', unitRow.id)
-          }
-          if (canAccessAuditLogs) {
-            await writeAudit(currentSociety.id, 'RESIDENT_ASSIGNED', { unitNumber, residentName: displayName })
-          }
-        } catch (err) {
-          console.error('[assignResident] Supabase persist failed:', err)
+    // Supabase persist (fire-and-forget) — localStorage already saved above,
+    // so any Supabase failure here is silently ignored.
+    if (!SB || !isSupabaseConfigured()) return
+    void (async () => {
+      try {
+        const sb = getSupabase()
+        if (!sb) return
+        const { data: unitRow } = await sb.from('units')
+          .select('id')
+          .eq('unit_number', unitNumber)
+          .eq('society_id', currentSociety.id)
+          .limit(1).single()
+        if (unitRow) {
+          await sb.from('units').update({
+            owner_name: displayName,
+            phone: displayPhone,
+            status: 'Occupied',
+          }).eq('id', unitRow.id)
         }
-      })()
-    }
+        if (canAccessAuditLogs) {
+          await writeAudit(currentSociety.id, 'RESIDENT_ASSIGNED', { unitNumber, residentName: displayName })
+        }
+      } catch {
+        // Silent fallback — localStorage already saved above
+      }
+    })()
   }, [currentSociety, canAccessAuditLogs])
 
   /* ── updateResident: edit resident details + occupancy ── */
   const updateResident = useCallback((unitNumber: string, updates: { name?: string; phone?: string; occupancy?: 'Occupied' | 'Vacant'; status?: Resident['status'] }) => {
-    // Update the resident record
-    setResidents(prev => prev.map(r => r.unitNumber === unitNumber ? {
+    // Compute new residents array (handle edit + possible removal if Vacant)
+    let newResidents = residentsRef.current.map(r => r.unitNumber === unitNumber ? {
       ...r,
       ...(updates.name ? { name: updates.name } : {}),
       ...(updates.phone ? { phone: updates.phone } : {}),
       ...(updates.status ? { status: updates.status } : {}),
-    } : r))
+    } : r)
+    if (updates.occupancy === 'Vacant') {
+      newResidents = newResidents.filter(r => r.unitNumber !== unitNumber)
+    }
+    setResidents(newResidents)
+    lsSave(LS_KEYS.residents(currentSociety.id), newResidents)
 
     // Sync status to matching invoices so Residents and Billing tables agree
     if (updates.status) {
-      setInvoices(prev => prev.map(i => {
+      const newInvoices = invoices.map(i => {
         if (i.unitNumber !== unitNumber) return i
         return { ...i, status: updates.status as Invoice['status'] }
-      }))
-    }
-
-    // If occupancy is changing to Vacant, clear the resident entirely
-    if (updates.occupancy === 'Vacant') {
-      setResidents(prev => prev.filter(r => r.unitNumber !== unitNumber))
+      })
+      setInvoices(newInvoices)
+      lsSave(LS_KEYS.invoices(currentSociety.id), newInvoices)
     }
 
     // Also update the unit
@@ -797,29 +841,30 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
       ...(updates.occupancy === 'Vacant' ? { ownerName: undefined, phone: undefined } : {}),
     } : u)
     setUnits(updatedUnits)
-    if (!SB) lsSave(LS_KEYS.units(currentSociety.id), updatedUnits)
+    lsSave(LS_KEYS.units(currentSociety.id), updatedUnits)
 
-    if (SB) {
-      (async () => {
-        try {
-          const sb = getSupabase()
-          if (!sb) return
-          const { data: unitRow } = await sb.from('units')
-            .select('id').eq('unit_number', unitNumber).eq('society_id', currentSociety.id).limit(1).single()
-          if (unitRow) {
-            const dbUpdates: Record<string, unknown> = {}
-            if (updates.name) dbUpdates.owner_name = updates.name
-            if (updates.phone) dbUpdates.phone = updates.phone
-            if (updates.occupancy) dbUpdates.status = updates.occupancy
-            if (updates.occupancy === 'Vacant') { dbUpdates.owner_name = null; dbUpdates.phone = null }
-            if (Object.keys(dbUpdates).length > 0) await sb.from('units').update(dbUpdates).eq('id', unitRow.id)
-          }
-        } catch (err) {
-          console.error('[updateResident] Supabase persist failed:', err)
+    // Supabase persist (fire-and-forget) — localStorage already saved above,
+    // so any Supabase failure here is silently ignored.
+    if (!SB || !isSupabaseConfigured()) return
+    void (async () => {
+      try {
+        const sb = getSupabase()
+        if (!sb) return
+        const { data: unitRow } = await sb.from('units')
+          .select('id').eq('unit_number', unitNumber).eq('society_id', currentSociety.id).limit(1).single()
+        if (unitRow) {
+          const dbUpdates: Record<string, unknown> = {}
+          if (updates.name) dbUpdates.owner_name = updates.name
+          if (updates.phone) dbUpdates.phone = updates.phone
+          if (updates.occupancy) dbUpdates.status = updates.occupancy
+          if (updates.occupancy === 'Vacant') { dbUpdates.owner_name = null; dbUpdates.phone = null }
+          if (Object.keys(dbUpdates).length > 0) await sb.from('units').update(dbUpdates).eq('id', unitRow.id)
         }
-      })()
-    }
-  }, [currentSociety])
+      } catch {
+        // Silent fallback — localStorage already saved above
+      }
+    })()
+  }, [currentSociety, invoices])
 
   /* ── checkoutResident: terminate lease with refund or forfeit ── */
   const checkoutResident = useCallback((unitNumber: string, action: 'refund' | 'forfeit') => {
@@ -861,11 +906,15 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
     // Remove overdue entry
     setOverdueResidents(prev => prev.filter(o => o.unitNumber !== unitNumber))
 
-    // Remove resident record
-    setResidents(prev => prev.filter(r => r.unitNumber !== unitNumber))
+    // Remove resident record + persist
+    const newResidents = residentsRef.current.filter(r => r.unitNumber !== unitNumber)
+    setResidents(newResidents)
+    lsSave(LS_KEYS.residents(currentSociety.id), newResidents)
 
-    // Set unit to Vacant
-    setUnits(prev => prev.map(u => u.unitNumber === unitNumber ? { ...u, occupancy: 'Vacant', ownerName: undefined, phone: undefined } : u))
+    // Set unit to Vacant + persist
+    const newUnits = unitsRef.current.map(u => u.unitNumber === unitNumber ? { ...u, occupancy: 'Vacant' as const, ownerName: undefined, phone: undefined } : u)
+    setUnits(newUnits)
+    lsSave(LS_KEYS.units(currentSociety.id), newUnits)
 
     // Audit log
     setAuditLogs(prev => [{
@@ -876,24 +925,24 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
       timestamp: new Date().toISOString(),
     }, ...prev])
 
-    // Supabase persist
-    if (SB) {
-      (async () => {
-        try {
-          const sb = getSupabase()
-          if (!sb) return
-          const { data: unitRow } = await sb.from('units').select('id').eq('unit_number', unitNumber).eq('society_id', currentSociety.id).limit(1).single()
-          if (unitRow) {
-            await sb.from('units').update({ status: 'Vacant', owner_name: null, phone: null }).eq('id', unitRow.id)
-          }
-          if (canAccessAuditLogs) {
-            await writeAudit(currentSociety.id, 'RESIDENT_CHECKED_OUT', { unitNumber, action, deposit })
-          }
-        } catch (err) {
-          console.error('[checkoutResident] Supabase persist failed:', err)
+    // Supabase persist (fire-and-forget) — localStorage already saved above,
+    // so any Supabase failure here is silently ignored.
+    if (!SB || !isSupabaseConfigured()) return
+    void (async () => {
+      try {
+        const sb = getSupabase()
+        if (!sb) return
+        const { data: unitRow } = await sb.from('units').select('id').eq('unit_number', unitNumber).eq('society_id', currentSociety.id).limit(1).single()
+        if (unitRow) {
+          await sb.from('units').update({ status: 'Vacant', owner_name: null, phone: null }).eq('id', unitRow.id)
         }
-      })()
-    }
+        if (canAccessAuditLogs) {
+          await writeAudit(currentSociety.id, 'RESIDENT_CHECKED_OUT', { unitNumber, action, deposit })
+        }
+      } catch {
+        // Silent fallback — localStorage already saved above
+      }
+    })()
   }, [residents, currentSociety, canAccessAuditLogs])
 
   /* ── Computed stats (derived from current data) ── */
@@ -925,17 +974,14 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
     // Local state: remove society and switch to first remaining
     const remaining = societies.filter(s => s.id !== societyId)
     setSocieties(remaining)
-    if (!SB) lsSave(LS_KEYS.societies, remaining)
+    lsSave(LS_KEYS.societies, remaining)
 
     // If deleting the active society, switch to the first remaining
     if (currentSociety.id === societyId) {
       const fallback = remaining[0]
       setCurrentSociety(fallback)
-      // Load fallback's tier and data
-      if (!SB) {
-        lsSave(LS_KEYS.currentSocietyId, fallback.id)
-        setCurrentTier(fallback.tier ?? 'TIER_1')
-      }
+      lsSave(LS_KEYS.currentSocietyId, fallback.id)
+      setCurrentTier(fallback.tier ?? 'TIER_1')
       // Clear data since we're switching away
       setUnits([])
       setResidents([])
@@ -944,26 +990,23 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
       setOverdueResidents([])
       setAuditLogs([])
     }
-    // Clean up localStorage for the deleted society
-    if (!SB) {
-      try {
-        localStorage.removeItem(LS_KEYS.units(societyId))
-        localStorage.removeItem(LS_KEYS.residents(societyId))
-        localStorage.removeItem(LS_KEYS.invoices(societyId))
-        localStorage.removeItem(LS_KEYS.payments(societyId))
-        localStorage.removeItem(LS_KEYS.auditLogs(societyId))
-      } catch { /* best-effort cleanup */ }
-    }
+    // Clean up localStorage for the deleted society (always, regardless of SB)
+    try {
+      localStorage.removeItem(LS_KEYS.units(societyId))
+      localStorage.removeItem(LS_KEYS.residents(societyId))
+      localStorage.removeItem(LS_KEYS.invoices(societyId))
+      localStorage.removeItem(LS_KEYS.payments(societyId))
+      localStorage.removeItem(LS_KEYS.auditLogs(societyId))
+    } catch { /* best-effort cleanup */ }
 
-    // Supabase persist
-    if (SB) {
-      try {
-        const sb = getSupabase()
-        if (!sb) return
-        await sb.from('societies').delete().eq('id', societyId)
-      } catch (err) {
-        console.error('[deleteSociety] Supabase delete failed:', err)
-      }
+    // Supabase persist — localStorage already cleaned up above
+    if (!SB || !isSupabaseConfigured()) return
+    try {
+      const sb = getSupabase()
+      if (!sb) return
+      await sb.from('societies').delete().eq('id', societyId)
+    } catch {
+      // Silent fallback — localStorage already saved above
     }
   }, [societies, currentSociety])
 
@@ -973,15 +1016,20 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
     if (!targetUnit) return
     const label = `${targetUnit.unitNumber} (${targetUnit.type})`
 
-    // Local state update
-    setUnits(prev => prev.filter(u => u.id !== unitId))
-    setInvoices(prev => prev.filter(i => {
-      // Remove invoices whose unitNumber matches
-      return i.unitNumber !== targetUnit.unitNumber
-    }))
-    setPayments(prev => prev.filter(p => p.unitNumber !== targetUnit.unitNumber))
-    setResidents(prev => prev.filter(r => r.unitNumber !== targetUnit.unitNumber))
+    // Local state update + persist to localStorage
+    const newUnits = units.filter(u => u.id !== unitId)
+    const newInvoices = invoices.filter(i => i.unitNumber !== targetUnit.unitNumber)
+    const newPayments = payments.filter(p => p.unitNumber !== targetUnit.unitNumber)
+    const newResidents = residents.filter(r => r.unitNumber !== targetUnit.unitNumber)
+    setUnits(newUnits)
+    setInvoices(newInvoices)
+    setPayments(newPayments)
+    setResidents(newResidents)
     setOverdueResidents(prev => prev.filter(r => r.unitNumber !== targetUnit.unitNumber))
+    lsSave(LS_KEYS.units(currentSociety.id), newUnits)
+    lsSave(LS_KEYS.invoices(currentSociety.id), newInvoices)
+    lsSave(LS_KEYS.payments(currentSociety.id), newPayments)
+    lsSave(LS_KEYS.residents(currentSociety.id), newResidents)
 
     // Audit log (TIER_3 only)
     if (canAccessAuditLogs) {
@@ -994,25 +1042,26 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
       }, ...prev])
     }
 
-    // Supabase persist
-    if (SB) {
-      try {
-        const sb = getSupabase()
-        if (!sb) return
-        await sb.from('units').delete().eq('id', unitId)
-      } catch (err) {
-        console.error('[deleteUnit] Supabase delete failed:', err)
-      }
+    // Supabase persist — localStorage already saved above
+    if (!SB || !isSupabaseConfigured()) return
+    try {
+      const sb = getSupabase()
+      if (!sb) return
+      await sb.from('units').delete().eq('id', unitId)
+    } catch {
+      // Silent fallback — localStorage already saved above
     }
-  }, [units, canAccessAuditLogs])
+  }, [units, invoices, payments, residents, canAccessAuditLogs, currentSociety])
 
   /* ── deletePayment: remove a payment record ── */
   const deletePayment = useCallback(async (paymentId: string) => {
     const targetPayment = payments.find(p => p.id === paymentId)
     if (!targetPayment) return
 
-    // Local state update
-    setPayments(prev => prev.filter(p => p.id !== paymentId))
+    // Local state update + persist
+    const newPayments = payments.filter(p => p.id !== paymentId)
+    setPayments(newPayments)
+    lsSave(LS_KEYS.payments(currentSociety.id), newPayments)
 
     // Audit log (TIER_3 only)
     if (canAccessAuditLogs) {
@@ -1025,17 +1074,16 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
       }, ...prev])
     }
 
-    // Supabase persist
-    if (SB) {
-      try {
-        const sb = getSupabase()
-        if (!sb) return
-        await sb.from('payments').delete().eq('id', paymentId)
-      } catch (err) {
-        console.error('[deletePayment] Supabase delete failed:', err)
-      }
+    // Supabase persist — localStorage already saved above
+    if (!SB || !isSupabaseConfigured()) return
+    try {
+      const sb = getSupabase()
+      if (!sb) return
+      await sb.from('payments').delete().eq('id', paymentId)
+    } catch {
+      // Silent fallback — localStorage already saved above
     }
-  }, [payments, canAccessAuditLogs])
+  }, [payments, canAccessAuditLogs, currentSociety])
 
   /* ── recordPayment ─────────────────────────────────────── */
 
@@ -1064,80 +1112,100 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
       return prev.map(o => o.unitNumber === inv.unitNumber ? { ...o, balance: newBalance } : o)
     })
 
-    setPayments(prev => {
-      const resident = residentsRef.current.find(r => inv && r.unitNumber === inv.unitNumber)
-      const receiptId = `REC-${nextPaymentNum++}`
-      const newPayment: PaymentRecord = {
-        id: `p${prev.length + 1}`,
-        receiptId,
-        residentName: resident?.name ?? inv?.residentName ?? '',
-        unitNumber: inv?.unitNumber ?? '',
-        amount,
-        date: dateOverride || fmtDate(new Date()),
-        method,
-      }
-      return [newPayment, ...prev]
-    })
+    // Compute the new payments array and persist to localStorage
+    const resident = residentsRef.current.find(r => inv && r.unitNumber === inv.unitNumber)
+    const receiptId = `REC-${nextPaymentNum++}`
+    const newPayment: PaymentRecord = {
+      id: `p${payments.length + 1}`,
+      receiptId,
+      residentName: resident?.name ?? inv?.residentName ?? '',
+      unitNumber: inv?.unitNumber ?? '',
+      amount,
+      date: dateOverride || fmtDate(new Date()),
+      method,
+    }
+    const newPayments = [newPayment, ...payments]
+    setPayments(newPayments)
+    lsSave(LS_KEYS.payments(currentSociety.id), newPayments)
+
+    // Also compute and persist updated invoices + residents to localStorage
+    // (refs hold pre-update values, so compute the new arrays manually)
+    if (inv) {
+      const newInvoices = invoicesRef.current.map(i => {
+        if (i.id !== invoiceId) return i
+        const newOutstanding = Math.max(0, i.outstanding - amount)
+        const newStatus = newOutstanding === 0 ? 'Paid' : newOutstanding < i.amount ? 'Partial' : i.status
+        return { ...i, outstanding: newOutstanding, status: newStatus as Invoice['status'] }
+      })
+      const newResidents = residentsRef.current.map(res => {
+        if (res.unitNumber !== inv.unitNumber) return res
+        const newBalance = Math.max(0, res.outstandingBalance - amount)
+        const newStatus = newBalance === 0 ? 'Paid' : 'Partial' as Resident['status']
+        return { ...res, outstandingBalance: newBalance, status: newStatus }
+      })
+      lsSave(LS_KEYS.invoices(currentSociety.id), newInvoices)
+      lsSave(LS_KEYS.residents(currentSociety.id), newResidents)
+    }
 
     // --- Supabase persist (async, fire-and-forget) ---
-    if (SB) {
-      try {
-        const sb = getSupabase()
-        if (!sb || !inv) return
+    // localStorage already saved above, so any failure here is silently ignored.
+    if (!SB || !isSupabaseConfigured()) return
+    try {
+      const sb = getSupabase()
+      if (!sb || !inv) return
 
-        // Find the DB unit_id for this invoice's unit
-        const { data: unitRow } = await sb
-          .from('units')
-          .select('id')
-          .eq('unit_number', inv.unitNumber)
-          .limit(1)
-          .single()
-        if (!unitRow) return
+      // Find the DB unit_id for this invoice's unit
+      const { data: unitRow } = await sb
+        .from('units')
+        .select('id')
+        .eq('unit_number', inv.unitNumber)
+        .limit(1)
+        .single()
+      if (!unitRow) return
 
-        // Find the DB invoice
-        const { data: dbInvoice } = await sb
-          .from('invoices')
-          .select('*')
-          .eq('unit_id', unitRow.id)
-          .eq('period', inv.period)
-          .limit(1)
-          .single()
-        if (!dbInvoice) return
+      // Find the DB invoice
+      const { data: dbInvoice } = await sb
+        .from('invoices')
+        .select('*')
+        .eq('unit_id', unitRow.id)
+        .eq('period', inv.period)
+        .limit(1)
+        .single()
+      if (!dbInvoice) return
 
-        const newOutstanding = Math.max(0, (dbInvoice.outstanding as number) - amount)
-        const newStatus = newOutstanding === 0 ? 'Paid' : newOutstanding < (dbInvoice.amount as number) ? 'Partial' : dbInvoice.status
+      const newOutstanding = Math.max(0, (dbInvoice.outstanding as number) - amount)
+      const newStatus = newOutstanding === 0 ? 'Paid' : newOutstanding < (dbInvoice.amount as number) ? 'Partial' : dbInvoice.status
 
-        // Update the invoice
-        await sb.from('invoices').update({ outstanding: newOutstanding, status: newStatus }).eq('id', dbInvoice.id)
+      // Update the invoice
+      await sb.from('invoices').update({ outstanding: newOutstanding, status: newStatus }).eq('id', dbInvoice.id)
 
-        // Insert the payment
-        await sb.from('payments').insert({
-          invoice_id: dbInvoice.id,
-          amount_paid: amount,
-          method,
-          receipt_number: `REC-${nextPaymentNum - 1}`,
-        })
+      // Insert the payment
+      await sb.from('payments').insert({
+        invoice_id: dbInvoice.id,
+        amount_paid: amount,
+        method,
+        receipt_number: `REC-${nextPaymentNum - 1}`,
+      })
 
-        // Update the unit owner's balance
-        if (unitRow) {
-          await sb.from('units').update({ owner_name: inv.residentName }).eq('id', unitRow.id)
-        }
-
-        // Audit log for TIER_3
-        if (canAccessAuditLogs) {
-          const { data: society } = await sb.from('societies').select('id').limit(1).single()
-          if (society) {
-            await writeAudit(society.id, 'PAYMENT_RECORDED', {
-              invoice_id: dbInvoice.id,
-              amount,
-              method,
-              unit_number: inv.unitNumber,
-            })
-          }
-        }
-      } catch (err) {
-        console.error('[recordPayment] Supabase persist failed:', err)
+      // Update the unit owner's balance
+      if (unitRow) {
+        await sb.from('units').update({ owner_name: inv.residentName }).eq('id', unitRow.id)
       }
+
+      // Audit log for TIER_3
+      if (canAccessAuditLogs) {
+        const { data: society } = await sb.from('societies').select('id').limit(1).single()
+        if (society) {
+          await writeAudit(society.id, 'PAYMENT_RECORDED', {
+            invoice_id: dbInvoice.id,
+            amount,
+            method,
+            unit_number: inv.unitNumber,
+          })
+        }
+      }
+    } catch {
+      // Silent fallback — localStorage already saved above
     }
   }, [invoices, canAccessAuditLogs])
 
@@ -1149,26 +1217,25 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
       prev.map(o => o.id === residentId ? { ...o, lastReminderDate: now } : o)
     )
 
-    if (SB) {
-      try {
-        const sb = getSupabase()
-        if (!sb) return
+    // Supabase persist — failures are silently ignored (state already updated)
+    if (!SB || !isSupabaseConfigured()) return
+    try {
+      const sb = getSupabase()
+      if (!sb) return
 
-        const { data: society } = await sb.from('societies').select('id').limit(1).single()
-        if (!society) return
+      const { data: society } = await sb.from('societies').select('id').limit(1).single()
+      if (!society) return
 
-        // Find the overdue resident to get the unit number for the audit log
-        const overdue = overdueRef.current.find(o => o.id === residentId)
+      const overdue = overdueRef.current.find(o => o.id === residentId)
 
-        if (canAccessAuditLogs) {
-          await writeAudit(society.id, 'REMINDER_SENT', {
-            resident_id: residentId,
-            unit_number: overdue?.unitNumber ?? '',
-          })
-        }
-      } catch (err) {
-        console.error('[sendReminder] Supabase persist failed:', err)
+      if (canAccessAuditLogs) {
+        await writeAudit(society.id, 'REMINDER_SENT', {
+          resident_id: residentId,
+          unit_number: overdue?.unitNumber ?? '',
+        })
       }
+    } catch {
+      // Silent fallback — nothing to recover, reminder is UI-only
     }
   }, [canAccessAuditLogs])
 
@@ -1206,7 +1273,9 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
       }
     })
 
-    setInvoices(prev => [...newInvoices, ...prev])
+    const allInvoices = [...newInvoices, ...invoices]
+    setInvoices(allInvoices)
+    lsSave(LS_KEYS.invoices(currentSociety.id), allInvoices)
 
     const newOverdue: OverdueResident[] = activeUnits
       .filter(u => !currentOverdue.some(o => o.unitNumber === u.unitNumber))
@@ -1227,52 +1296,52 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
     }
 
     // --- Supabase persist ---
-    if (SB) {
-      try {
-        const sb = getSupabase()
-        if (!sb) return
+    // localStorage already saved above, so any failure here is silently ignored.
+    if (!SB || !isSupabaseConfigured()) return
+    try {
+      const sb = getSupabase()
+      if (!sb) return
 
-        const { data: society } = await sb.from('societies').select('id').limit(1).single()
-        if (!society) return
+      const { data: society } = await sb.from('societies').select('id').limit(1).single()
+      if (!society) return
 
-        const societyId = society.id
+      const societyId = society.id
 
-        // Fetch current units from DB
-        const { data: dbUnits } = await sb.from('units').select('id, unit_number').eq('society_id', societyId)
-        if (!dbUnits) return
+      // Fetch current units from DB
+      const { data: dbUnits } = await sb.from('units').select('id, unit_number').eq('society_id', societyId)
+      if (!dbUnits) return
 
-        const invoiceInserts = dbUnits
-          .filter((u: Record<string, unknown>) => {
-            // Only occupied units (check if they have an existing active invoice)
-            const unitNumber = u.unit_number as string
-            return activeUnits.some(au => au.unitNumber === unitNumber)
-          })
-          .map((u: Record<string, unknown>) => ({
-            unit_id: u.id as string,
-            period,
-            amount: defaultAmount,
-            outstanding: defaultAmount,
-            status: 'Pending',
-            due_date: dueDate,
-          }))
+      const invoiceInserts = dbUnits
+        .filter((u: Record<string, unknown>) => {
+          // Only occupied units (check if they have an existing active invoice)
+          const unitNumber = u.unit_number as string
+          return activeUnits.some(au => au.unitNumber === unitNumber)
+        })
+        .map((u: Record<string, unknown>) => ({
+          unit_id: u.id as string,
+          period,
+          amount: defaultAmount,
+          outstanding: defaultAmount,
+          status: 'Pending',
+          due_date: dueDate,
+        }))
 
-        if (invoiceInserts.length > 0) {
-          await sb.from('invoices').insert(invoiceInserts)
-        }
-
-        // Audit log
-        if (canAccessAuditLogs) {
-          await writeAudit(societyId, 'INVOICES_GENERATED', {
-            period,
-            unit_count: invoiceInserts.length,
-            total_amount: invoiceInserts.length * defaultAmount,
-          })
-        }
-      } catch (err) {
-        console.error('[generateMonthlyInvoices] Supabase persist failed:', err)
+      if (invoiceInserts.length > 0) {
+        await sb.from('invoices').insert(invoiceInserts)
       }
+
+      // Audit log
+      if (canAccessAuditLogs) {
+        await writeAudit(societyId, 'INVOICES_GENERATED', {
+          period,
+          unit_count: invoiceInserts.length,
+          total_amount: invoiceInserts.length * defaultAmount,
+        })
+      }
+    } catch {
+      // Silent fallback — localStorage already saved above
     }
-  }, [canAccessAuditLogs])
+  }, [currentSociety, invoices, canAccessAuditLogs])
 
   /* ── Memoised value ────────────────────────────────────── */
 
