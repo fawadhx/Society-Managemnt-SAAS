@@ -13,21 +13,15 @@ export default function GenerateChargesModal({ close, onSuccess }: Props) {
   const { units, invoices, generateMonthlyInvoices } = useSociety()
   const activeUnits = useMemo(() => units.filter(u => u.occupancy === 'Occupied'), [units])
 
-  // Calculate arrears from previous unpaid invoices
-  const totalArrears = useMemo(() => {
-    let sum = 0
-    for (const inv of invoices) {
-      if (inv.outstanding > 0 && inv.status !== 'Paid') sum += inv.outstanding
-    }
-    return sum
-  }, [invoices])
+  // Every unit is billed its own monthly maintenance fee (its recurring charge).
+  const combinedFees = useMemo(() => activeUnits.reduce((sum, u) => sum + (u.monthlyCharge || 0), 0), [activeUnits])
+  const alreadyBilledPeriods = useMemo(() => new Set(invoices.map(i => i.period)), [invoices])
 
   const [period, setPeriod] = useState(() => {
     const d = new Date()
     d.setMonth(d.getMonth() + 1)
     return d.toLocaleString('en', { month: 'long', year: 'numeric' })
   })
-  const [fee, setFee] = useState('12500')
   const [dueDate, setDueDate] = useState(() => {
     const d = new Date()
     d.setMonth(d.getMonth() + 1)
@@ -35,14 +29,15 @@ export default function GenerateChargesModal({ close, onSuccess }: Props) {
     return d.toISOString().slice(0, 10)
   })
 
-  const parsedFee = Number(fee) || 0
-  const totalRevenue = activeUnits.length * parsedFee + totalArrears
-  const isValid = period.trim().length > 0 && parsedFee > 0
+  const totalRevenue = combinedFees
+  const isValid = period.trim().length > 0 && activeUnits.length > 0
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (!isValid) return
-    generateMonthlyInvoices(period.trim(), parsedFee, dueDate)
+    // Second argument is only a fallback for units without a custom fee —
+    // each unit is billed its own monthlyCharge.
+    generateMonthlyInvoices(period.trim(), Math.round(combinedFees / Math.max(1, activeUnits.length)), dueDate)
     close()
     onSuccess(`Generated ${activeUnits.length} invoices for ${period.trim()} — total ${fmt(totalRevenue)}.`)
   }
@@ -68,16 +63,6 @@ export default function GenerateChargesModal({ close, onSuccess }: Props) {
               />
             </label>
             <label>
-              Maintenance fee per unit (PKR)
-              <input
-                type="number"
-                min={1}
-                value={fee}
-                onChange={e => setFee(e.target.value)}
-                placeholder="12,500"
-              />
-            </label>
-            <label>
               Due date
               <input
                 type="date"
@@ -87,12 +72,17 @@ export default function GenerateChargesModal({ close, onSuccess }: Props) {
             </label>
             <div className="charge-preview">
               <p className="preview-label">Preview</p>
-              <div className="preview-row"><span>Active units to bill</span><strong>{activeUnits.length}</strong></div>
-              <div className="preview-row"><span>Fee per unit</span><strong>{fmt(parsedFee)}</strong></div>
-              {totalArrears > 0 && <div className="preview-row" style={{ color: 'var(--danger)' }}><span>Arrears (unpaid balance)</span><strong>{fmt(totalArrears)}</strong></div>}
+              <div className="preview-row"><span>Occupied units to bill</span><strong>{activeUnits.length}</strong></div>
+              <div className="preview-row"><span>Combined monthly fees</span><strong>{fmt(combinedFees)}</strong></div>
+              {alreadyBilledPeriods.has(period.trim()) && <div className="preview-row" style={{ color: 'var(--warning)' }}><span>Units already billed for this period are skipped</span></div>}
               <div className="preview-row preview-total"><span>Total due</span><strong>{fmt(totalRevenue)}</strong></div>
             </div>
           </div>
+          {activeUnits.length === 0 && (
+            <p style={{ padding: '0 24px 12px', margin: 0, fontSize: 12, color: 'var(--muted-foreground)' }}>
+              No occupied units to bill. Assign residents to vacant properties first.
+            </p>
+          )}
           <div className="modal-actions">
             <Button type="button" variant="outline" onClick={close}>Cancel</Button>
             <Button type="submit" disabled={!isValid}><CheckCircle2 data-icon="inline-start" />Generate invoices</Button>

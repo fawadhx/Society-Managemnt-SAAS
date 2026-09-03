@@ -1,8 +1,12 @@
 'use client'
 
-import { useMemo } from 'react'
-import { X, Bell, Send, CreditCard, AlertCircle, CheckCircle2, Clock3 } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { X, Bell, CreditCard, AlertCircle, CheckCircle2, Clock3 } from 'lucide-react'
 import { useSociety } from '@/lib/society-context'
+
+const SEEN_KEY = 'sm_notifs_seen'
+function loadSeen(): string[] { try { return JSON.parse(localStorage.getItem(SEEN_KEY) || '[]') } catch { return [] } }
+function saveSeen(ids: string[]) { try { localStorage.setItem(SEEN_KEY, JSON.stringify(ids.slice(0, 200))) } catch { /* noop */ } }
 
 type Notification = {
   id: string
@@ -15,7 +19,8 @@ type Notification = {
 }
 
 export default function NotificationsModal({ close }: { close: () => void }) {
-  const { payments, overdueResidents, currentSociety } = useSociety()
+  const { payments, overdueResidents, residents, invoices } = useSociety()
+  const [seen, setSeen] = useState<string[]>(() => (typeof window === 'undefined' ? [] : loadSeen()))
 
   const notifications: Notification[] = useMemo(() => {
     const items: Notification[] = []
@@ -46,30 +51,48 @@ export default function NotificationsModal({ close }: { close: () => void }) {
       })
     })
 
-    // Static system notifications
-    items.push({
-      id: 'sys-1',
-      icon: CheckCircle2,
-      iconColor: 'var(--primary)',
-      iconBg: 'var(--secondary)',
-      title: `Monthly invoices for August 2026 generated successfully`,
-      time: '1 Aug 2026',
-      read: true,
-    })
-    items.push({
-      id: 'sys-2',
-      icon: Clock3,
-      iconColor: 'var(--warning)',
-      iconBg: '#fbf4e8',
-      title: `Billing period closing in 5 days — 27 invoices still pending`,
-      time: '5 Aug 2026',
-      read: true,
-    })
+    // Resident approvals waiting on the admin (live data, not hard-coded)
+    const pendingCount = residents.filter(r => r.accountStatus === 'Pending').length
+    if (pendingCount > 0) {
+      items.push({
+        id: 'pending-approvals',
+        icon: Clock3,
+        iconColor: 'var(--warning)',
+        iconBg: '#fbf4e8',
+        title: `${pendingCount} resident${pendingCount !== 1 ? 's' : ''} awaiting account approval`,
+        time: 'Pending review',
+        read: false,
+      })
+    }
+
+    // Latest billing run (derived from actual invoices)
+    let latestPeriod: string | null = null
+    let latestDue = -Infinity
+    for (const inv of invoices) {
+      const due = new Date(inv.dueDate).getTime()
+      if (Number.isNaN(due)) continue
+      if (due > latestDue) { latestDue = due; latestPeriod = inv.period }
+    }
+    if (latestPeriod) {
+      const periodInvoices = invoices.filter(i => i.period === latestPeriod)
+      const total = periodInvoices.reduce((sum, i) => sum + i.amount, 0)
+      items.push({
+        id: 'billing-run',
+        icon: CheckCircle2,
+        iconColor: 'var(--primary)',
+        iconBg: 'var(--secondary)',
+        title: `Maintenance invoices for ${latestPeriod} generated — ${periodInvoices.length} bill${periodInvoices.length !== 1 ? 's' : ''}, PKR ${total.toLocaleString('en-PK')}`,
+        time: 'Billing',
+        read: true,
+      })
+    }
 
     return items
-  }, [payments, overdueResidents])
+  }, [payments, overdueResidents, residents, invoices])
 
-  const unreadCount = notifications.filter(n => !n.read).length
+  const isRead = (n: Notification) => n.read || seen.includes(n.id)
+  const unreadCount = notifications.filter(n => !isRead(n)).length
+  const markAllRead = () => { const ids = notifications.map(n => n.id); saveSeen(ids); setSeen(ids) }
 
   return (
     <div className="modal-backdrop" onClick={close}>
@@ -85,10 +108,12 @@ export default function NotificationsModal({ close }: { close: () => void }) {
           </button>
         </div>
         <div className="notifications-list">
+          {notifications.length === 0 && <div className="empty-state" style={{ padding: '32px 20px' }}><p style={{ fontSize: 12 }}>Nothing to show.</p></div>}
           {notifications.map(n => {
             const Icon = n.icon
+            const read = isRead(n)
             return (
-              <div key={n.id} className={`notification-item ${!n.read ? 'unread' : ''}`}>
+              <div key={n.id} className={`notification-item ${!read ? 'unread' : ''}`}>
                 <div className="notification-icon" style={{ color: n.iconColor, background: n.iconBg }}>
                   <Icon size={14} />
                 </div>
@@ -96,13 +121,15 @@ export default function NotificationsModal({ close }: { close: () => void }) {
                   <p className="notification-title">{n.title}</p>
                   <span className="notification-time">{n.time}</span>
                 </div>
-                {!n.read && <div className="notification-dot" />}
+                {!read && <div className="notification-dot" />}
               </div>
             )
           })}
         </div>
         <div className="notifications-footer">
-          <span>{unreadCount > 0 ? `${unreadCount} unread notification${unreadCount > 1 ? 's' : ''}` : 'All caught up!'}</span>
+          {unreadCount > 0
+            ? <button className="linkish" onClick={markAllRead}>Mark all as read ({unreadCount})</button>
+            : <span>All caught up!</span>}
         </div>
       </div>
     </div>

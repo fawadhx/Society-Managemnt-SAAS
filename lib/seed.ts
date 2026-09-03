@@ -1,164 +1,72 @@
 /**
- * Seed script — populates the Supabase database with sample data for testing.
- *
- * Usage (from browser console or a dev-only button):
- *   import { seedDatabase } from '@/lib/seed'
- *   await seedDatabase()
- *
- * Requires NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY to be set.
+ * Demo-data seeder — fills the CURRENT society with sample units, residents,
+ * invoices and payments so a fresh workspace has something to show. Runs as the
+ * signed-in user (RLS-scoped); safe because it only touches this society.
  */
 
-import { getSupabase, requireSupabase } from './supabase'
-
-/* ── Seed data ──────────────────────────────────────────── */
-
-const SOCIETY = {
-  name: 'Green Valley Housing Society',
-  address: 'Main Boulevard, Phase 5, DHA, Lahore',
-  tier: 'TIER_3' as const,
-  default_fee: 12500,
-}
+import { getSupabase } from './supabase'
 
 const UNITS = [
-  { unit_number: 'A-101', owner_name: 'Ahmed Raza',   phone: '0300 1234567', status: 'Occupied' },
-  { unit_number: 'A-102', owner_name: 'Fatima Khan',   phone: '0312 5550142', status: 'Occupied' },
-  { unit_number: 'A-103', owner_name: 'Usman Tariq',   phone: '0333 8211004', status: 'Occupied' },
-  { unit_number: 'B-204', owner_name: 'Sana Iqbal',    phone: '0301 4412233', status: 'Occupied' },
-  { unit_number: 'B-205', owner_name: 'Hassan Ali',    phone: '0321 7789001', status: 'Occupied' },
-  { unit_number: 'C-301', owner_name: 'Bilal Shah',    phone: '0300 5551234', status: 'Vacant'   },
-  { unit_number: 'C-304', owner_name: 'Mariam Noor',   phone: '0311 9990876', status: 'Occupied' },
+  { unit_number: 'A-101', block: 'A', monthly_charge: 12500, resident: { name: 'Ahmed Raza', phone: '0300 1234567' } },
+  { unit_number: 'A-102', block: 'A', monthly_charge: 12500, resident: { name: 'Fatima Khan', phone: '0312 5550142' } },
+  { unit_number: 'A-103', block: 'A', monthly_charge: 15000, resident: { name: 'Usman Tariq', phone: '0333 8211004' } },
+  { unit_number: 'B-204', block: 'B', monthly_charge: 18000, resident: { name: 'Sana Iqbal', phone: '0301 4412233' } },
+  { unit_number: 'B-205', block: 'B', monthly_charge: 18000, resident: { name: 'Hassan Ali', phone: '0321 7789001' } },
+  { unit_number: 'C-301', block: 'C', monthly_charge: 12500, resident: null },
+  { unit_number: 'C-304', block: 'C', monthly_charge: 22000, resident: { name: 'Mariam Noor', phone: '0311 9990876' } },
 ]
 
-/**
- * Inserts seed data into Supabase and returns a summary of what was created.
- * Idempotent: deletes existing society data first to avoid duplicates on re-run.
- */
-export async function seedDatabase(): Promise<{
-  societyId: string
-  units: number
-  invoices: number
-  payments: number
-}> {
-  const sb = requireSupabase()
-
-  // ── 1. Upsert society ─────────────────────────────────
-  const { data: existingSociety } = await sb
-    .from('societies')
-    .select('id')
-    .eq('name', SOCIETY.name)
-    .limit(1)
-    .single()
-
-  let societyId: string
-
-  if (existingSociety) {
-    // Re-seed: delete existing data for this society (cascades via FK)
-    societyId = existingSociety.id
-    await sb.from('audit_logs').delete().eq('society_id', societyId)
-    await sb.from('payments').delete().in('invoice_id',
-      (await sb.from('invoices').select('id').in('unit_id',
-        (await sb.from('units').select('id').eq('society_id', societyId)).data?.map((u: { id: string }) => u.id) ?? []
-      )).data?.map((i: { id: string }) => i.id) ?? []
-    )
-    await sb.from('invoices').delete().in('unit_id',
-      (await sb.from('units').select('id').eq('society_id', societyId)).data?.map((u: { id: string }) => u.id) ?? []
-    )
-    await sb.from('units').delete().eq('society_id', societyId)
-    await sb.from('societies').update({ tier: SOCIETY.tier, default_fee: SOCIETY.default_fee }).eq('id', societyId)
-  } else {
-    const { data } = await sb.from('societies').insert({
-      name: SOCIETY.name,
-      address: SOCIETY.address,
-      tier: SOCIETY.tier,
-      default_fee: SOCIETY.default_fee,
-    }).select('id').single()
-    societyId = data!.id
-  }
-
-  // ── 2. Insert units ───────────────────────────────────
-  const unitRows = UNITS.map(u => ({ ...u, society_id: societyId }))
-  const { data: insertedUnits } = await sb.from('units').insert(unitRows).select('id, unit_number')
-  const unitIdMap = new Map<string, string>()
-  for (const u of insertedUnits ?? []) {
-    unitIdMap.set(u.unit_number, u.id)
-  }
-
-  // ── 3. Insert sample invoices (Aug 2026) ──────────────
-  const invoiceStatuses: Record<string, { status: string; outstanding: number }> = {
-    'A-101': { status: 'Paid',    outstanding: 0 },
-    'A-102': { status: 'Overdue', outstanding: 12500 },
-    'A-103': { status: 'Paid',    outstanding: 0 },
-    'B-204': { status: 'Partial', outstanding: 4500 },
-    'B-205': { status: 'Overdue', outstanding: 8000 },
-    'C-304': { status: 'Overdue', outstanding: 4500 },
-  }
-
-  const invoiceInserts = Object.entries(invoiceStatuses).map(([unitNum, info]) => ({
-    unit_id: unitIdMap.get(unitNum)!,
-    period: 'Aug 2026',
-    amount: 12500,
-    outstanding: info.outstanding,
-    status: info.status,
-    due_date: '2026-08-10',
-  }))
-
-  const { data: insertedInvoices } = await sb.from('invoices').insert(invoiceInserts).select('id, unit_id')
-  const invoiceIdMap = new Map<string, string>()
-  for (const inv of insertedInvoices ?? []) {
-    // Map unit_id → invoice_id
-    for (const [unitNum, unitId] of unitIdMap.entries()) {
-      if (inv.unit_id === unitId) {
-        invoiceIdMap.set(unitNum, inv.id)
-        break
-      }
-    }
-  }
-
-  // ── 4. Insert sample payments ─────────────────────────
-  const paymentInserts = [
-    { invoiceId: 'A-101', amount_paid: 12500, method: 'Bank Transfer', receipt_number: 'REC-1048', created_at: '2026-08-20T10:00:00Z' },
-    { invoiceId: 'A-103', amount_paid: 12500, method: 'JazzCash',      receipt_number: 'REC-1047', created_at: '2026-08-19T14:30:00Z' },
-    { invoiceId: 'B-204', amount_paid: 8000,  method: 'Cash',          receipt_number: 'REC-1046', created_at: '2026-08-18T09:15:00Z' },
-  ].filter(p => invoiceIdMap.has(p.invoiceId))
-    .map(p => ({
-      invoice_id: invoiceIdMap.get(p.invoiceId)!,
-      amount_paid: p.amount_paid,
-      method: p.method,
-      receipt_number: p.receipt_number,
-      created_at: p.created_at,
-    }))
-
-  if (paymentInserts.length > 0) {
-    await sb.from('payments').insert(paymentInserts)
-  }
-
-  // ── 5. Seed an audit log entry ────────────────────────
-  await sb.from('audit_logs').insert({
-    society_id: societyId,
-    action: 'SEED_COMPLETED',
-    performed_by: 'system',
-    metadata: { unit_count: UNITS.length, invoice_count: invoiceInserts.length },
-  })
-
-  return {
-    societyId,
-    units: insertedUnits?.length ?? 0,
-    invoices: insertedInvoices?.length ?? 0,
-    payments: paymentInserts.length,
-  }
-}
-
-/**
- * Quick check — returns true if the seed data already exists.
- */
-export async function isSeeded(): Promise<boolean> {
+export async function seedCurrentSociety(societyId: string): Promise<{ units: number; residents: number; invoices: number }> {
   const sb = getSupabase()
-  if (!sb) return false
+  if (!sb) throw new Error('Supabase is not configured.')
 
-  const { count } = await sb
-    .from('societies')
-    .select('*', { count: 'exact', head: true })
-    .eq('name', SOCIETY.name)
+  // Wipe existing rows for this society (RLS keeps us inside our own tenant).
+  await sb.from('payments').delete().eq('society_id', societyId)
+  await sb.from('invoices').delete().eq('society_id', societyId)
+  await sb.from('residents').delete().eq('society_id', societyId)
+  await sb.from('units').delete().eq('society_id', societyId)
 
-  return (count ?? 0) > 0
+  const { data: unitRows } = await sb.from('units').insert(
+    UNITS.map(u => ({
+      society_id: societyId, unit_number: u.unit_number, block: u.block, type: 'Apartment',
+      monthly_charge: u.monthly_charge, status: u.resident ? 'Occupied' : 'Vacant',
+    })),
+  ).select('id, unit_number')
+
+  const idOf = new Map<string, string>((unitRows ?? []).map(r => [r.unit_number as string, r.id as string]))
+
+  const residentRows = UNITS.filter(u => u.resident).map(u => ({
+    society_id: societyId, unit_id: idOf.get(u.unit_number)!, name: u.resident!.name,
+    phone: u.resident!.phone, security_deposit: u.monthly_charge, account_status: 'Active',
+  }))
+  await sb.from('residents').insert(residentRows)
+
+  const period = new Date().toLocaleString('en', { month: 'long', year: 'numeric' })
+  const due = new Date(); due.setDate(10)
+  const invoiceRows = UNITS.filter(u => u.resident).map((u, i) => {
+    const paidFully = i % 3 === 0
+    const partial = i % 3 === 1
+    return {
+      society_id: societyId, unit_id: idOf.get(u.unit_number)!, resident_name: u.resident!.name,
+      period, amount: u.monthly_charge,
+      outstanding: paidFully ? 0 : partial ? Math.round(u.monthly_charge / 2) : u.monthly_charge,
+      status: paidFully ? 'Paid' : partial ? 'Partial' : 'Pending',
+      due_date: due.toISOString().slice(0, 10),
+    }
+  })
+  const { data: invRows } = await sb.from('invoices').insert(invoiceRows).select('id, unit_id, amount, outstanding')
+
+  const paymentRows = (invRows ?? [])
+    .filter(inv => Number(inv.amount) - Number(inv.outstanding) > 0)
+    .map((inv, i) => ({
+      society_id: societyId, invoice_id: inv.id as string,
+      amount_paid: Number(inv.amount) - Number(inv.outstanding),
+      method: (['Bank Transfer', 'JazzCash', 'EasyPaisa', 'Cash'] as const)[i % 4],
+      receipt_number: `REC-${1000 + i}`, paid_on: new Date().toISOString().slice(0, 10),
+    }))
+  if (paymentRows.length) await sb.from('payments').insert(paymentRows)
+
+  await sb.from('audit_logs').insert({ society_id: societyId, action: 'DEMO_DATA_SEEDED', performed_by: 'system', metadata: { units: UNITS.length } })
+
+  return { units: unitRows?.length ?? 0, residents: residentRows.length, invoices: invRows?.length ?? 0 }
 }

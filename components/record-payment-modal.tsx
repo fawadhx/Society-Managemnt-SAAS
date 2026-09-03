@@ -3,46 +3,51 @@
 import { useMemo, useState, useCallback } from 'react'
 import { CheckCircle2, X, Send } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { useSociety } from '@/lib/society-context'
+import { residentForUnit, useSociety } from '@/lib/society-context'
 
 const fmt = (value: number) => `PKR ${value.toLocaleString('en-PK')}`
 
-type Props = { close: () => void; onSuccess: (msg: string) => void }
+type Props = { close: () => void; onSuccess: (msg: string) => void; initialUnit?: string }
 
-export default function RecordPaymentModal({ close, onSuccess }: Props) {
+export default function RecordPaymentModal({ close, onSuccess, initialUnit }: Props) {
   const { invoices, residents, recordPayment } = useSociety()
-  const unpaid = useMemo(() => invoices.filter(i => i.status !== 'Paid'), [invoices])
+  const unpaid = useMemo(() => invoices.filter(i => i.status !== 'Paid' && i.outstanding > 0), [invoices])
+  const preferred = initialUnit ? unpaid.find(i => i.unitNumber === initialUnit) : undefined
+  const defaultInvoice = preferred ?? unpaid[0]
 
-  const [invoiceId, setInvoiceId] = useState(unpaid[0]?.id ?? '')
-  const [amount, setAmount] = useState(unpaid[0]?.outstanding.toString() ?? '')
+  const [invoiceId, setInvoiceId] = useState(defaultInvoice?.id ?? '')
+  const [amount, setAmount] = useState(defaultInvoice?.outstanding.toString() ?? '')
   const [method, setMethod] = useState('Bank Transfer')
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10))
+  const [status, setStatus] = useState<'Confirmed' | 'Pending'>('Confirmed')
   const [sendWhatsApp, setSendWhatsApp] = useState(false)
 
   const selectedInvoice = invoices.find(i => i.id === invoiceId)
-  const selectedResident = selectedInvoice ? residents.find(r => r.unitNumber === selectedInvoice.unitNumber) : undefined
+  // Receipts go to the resident currently attached to the unit.
+  const selectedResident = selectedInvoice ? residentForUnit(selectedInvoice.unitNumber, residents) : undefined
   const parsedAmount = Number(amount) || 0
   const isValid = invoiceId && parsedAmount > 0 && parsedAmount <= (selectedInvoice?.outstanding ?? Infinity)
 
-  const openWhatsApp = useCallback((residentName: string, phone: string, unitNumber: string, payAmount: number, receiptNo: string, remaining: number) => {
+  const openWhatsApp = useCallback((residentName: string, phone: string, unitNumber: string, payAmount: number, remaining: number) => {
     const cleanPhone = phone.replace(/[^0-9+]/g, '')
     const message = encodeURIComponent(
-      `Dear ${residentName}, we have received your payment of ${fmt(payAmount)} for Unit ${unitNumber}. Receipt #${receiptNo}. Outstanding balance: ${fmt(remaining)}.`
+      `Dear ${residentName}, we have received your payment of ${fmt(payAmount)} for Unit ${unitNumber}. Outstanding balance: ${fmt(remaining)}. Thank you.`
     )
     window.open(`https://wa.me/${cleanPhone}?text=${message}`, '_blank')
   }, [])
 
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (!isValid || !selectedInvoice) return
     const remaining = Math.max(0, selectedInvoice.outstanding - parsedAmount)
-    recordPayment(invoiceId, parsedAmount, method, date)
-    const receiptNo = `REC-${Math.floor(Math.random() * 9000) + 1000}`
-    if (sendWhatsApp && selectedResident?.phone && selectedResident.phone !== '—') {
-      openWhatsApp(selectedResident.name, selectedResident.phone, selectedInvoice.unitNumber, parsedAmount, receiptNo, remaining)
+    await recordPayment(invoiceId, parsedAmount, method, date, status)
+    if (status === 'Confirmed' && sendWhatsApp && selectedResident?.phone && selectedResident.phone !== '—') {
+      openWhatsApp(selectedResident.name, selectedResident.phone, selectedInvoice.unitNumber, parsedAmount, remaining)
     }
     close()
-    onSuccess(`Payment of ${fmt(parsedAmount)} recorded successfully.${sendWhatsApp ? ' WhatsApp receipt sent.' : ''}`)
+    onSuccess(status === 'Pending'
+      ? `Pending payment of ${fmt(parsedAmount)} logged — confirm it once the money clears.`
+      : `Payment of ${fmt(parsedAmount)} recorded.${sendWhatsApp ? ' WhatsApp receipt opened.' : ''}`)
   }
 
   return (
@@ -95,6 +100,13 @@ export default function RecordPaymentModal({ close, onSuccess }: Props) {
             <label>
               Payment date
               <input type="date" value={date} onChange={e => setDate(e.target.value)} />
+            </label>
+            <label className="span-2">
+              Status
+              <select value={status} onChange={e => setStatus(e.target.value as 'Confirmed' | 'Pending')}>
+                <option value="Confirmed">Confirmed — money received, apply to the bill now</option>
+                <option value="Pending">Pending — awaiting clearance, don&apos;t reduce the bill yet</option>
+              </select>
             </label>
           </div>
           {selectedResident?.phone && selectedResident.phone !== '—' && (

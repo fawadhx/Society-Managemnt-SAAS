@@ -11,7 +11,7 @@ type Props = {
 }
 
 export default function SocietySwitcherModal({ close, onSuccess }: Props) {
-  const { societies, currentSociety, switchSociety, addSociety, deleteSociety, canAccessAuditLogs } = useSociety()
+  const { societies, currentSociety, switchSociety, addSociety, deleteSociety, canMultiSociety } = useSociety()
   const [showAdd, setShowAdd] = useState(false)
   const [newName, setNewName] = useState('')
   const [newAddress, setNewAddress] = useState('')
@@ -54,8 +54,8 @@ export default function SocietySwitcherModal({ close, onSuccess }: Props) {
           {societies.map(s => (
             <button
               key={s.id}
-              className={`society-list-item ${s.id === currentSociety.id ? 'active' : ''} ${!canAccessAuditLogs ? 'locked' : ''}`}
-              onClick={() => canAccessAuditLogs && handleSelect(s)}
+              className={`society-list-item ${s.id === currentSociety.id ? 'active' : ''} ${!canMultiSociety ? 'locked' : ''}`}
+              onClick={() => canMultiSociety && handleSelect(s)}
             >
               <div className="society-list-icon"><Home size={18} /></div>
               <div className="society-list-info">
@@ -68,9 +68,9 @@ export default function SocietySwitcherModal({ close, onSuccess }: Props) {
           ))}
         </div>
 
-        {!canAccessAuditLogs && <div className="upgrade-banner" style={{ marginTop: 12 }}><Lock size={18} /><p>Multi-Society Management requires Tier 3 Enterprise (PKR 5,000/mo).</p></div>}
+        {!canMultiSociety && <div className="upgrade-banner" style={{ marginTop: 12 }}><Lock size={18} /><p>Multi-Society Management requires Tier 3 Enterprise (PKR 5,000/mo).</p></div>}
 
-        {!showAdd && canAccessAuditLogs && (
+        {!showAdd && canMultiSociety && (
             <Button variant="outline" className="full-button" onClick={() => setShowAdd(true)}>
               <Plus data-icon="inline-start" />Add New Society / Plaza
             </Button>
