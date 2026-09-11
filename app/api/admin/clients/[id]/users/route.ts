@@ -57,6 +57,41 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   return NextResponse.json({ ok: true })
 }
 
+/**
+ * Reset a member's password. The super admin sets a temporary password; the
+ * user is forced to choose a new one on their next login.
+ *
+ * The password is hashed by Supabase Auth via `admin.auth.admin.updateUserById`
+ * — exactly the same path `admin.auth.admin.createUser` uses. No plaintext of
+ * the existing password is ever read or exposed.
+ */
+export async function PUT(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { ok, appUser } = await requireSuperAdmin()
+  if (!ok) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  const admin = getAdminClient()
+  if (!admin) return NextResponse.json({ error: 'SUPABASE_SERVICE_ROLE_KEY is not set on the server.' }, { status: 500 })
+  const { id } = await params
+  const { userId, password } = await req.json()
+  if (!userId || typeof password !== 'string') return NextResponse.json({ error: 'Bad request.' }, { status: 400 })
+  if (password.length < 8) return NextResponse.json({ error: 'Password must be at least 8 characters.' }, { status: 400 })
+
+  // The target must actually be a member of this client's workspace.
+  const { data: member } = await admin.from('society_members').select('user_id')
+    .eq('society_id', id).eq('user_id', userId).maybeSingle()
+  if (!member) return NextResponse.json({ error: 'That user is not on this workspace.' }, { status: 404 })
+  const { data: target } = await admin.from('app_users').select('email').eq('id', userId).maybeSingle()
+
+  const { error } = await admin.auth.admin.updateUserById(userId, { password })
+  if (error) return NextResponse.json({ error: error.message }, { status: 400 })
+
+  await admin.from('app_users').update({ must_change_password: true }).eq('id', userId)
+  await admin.from('audit_logs').insert({
+    society_id: id, user_id: userId, action: 'PASSWORD_RESET',
+    performed_by: appUser.email, metadata: { user: target?.email ?? userId },
+  })
+  return NextResponse.json({ ok: true })
+}
+
 export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { ok, appUser } = await requireSuperAdmin()
   if (!ok) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })

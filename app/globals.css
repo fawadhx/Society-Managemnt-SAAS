@@ -308,3 +308,51 @@ button { cursor: pointer; }
 @media (max-width: 720px) {
   .mobile-backdrop { display: block; position: fixed; z-index: 14; inset: 0; background: rgba(8, 15, 20, .45) }
 }
+
+/* ── Public marketing site (/site/[slug]) — T3 CMS ─────── */
+.site-page { min-height: 100vh; background: var(--background); color: var(--foreground); font-size: 15px; line-height: 1.6; }
+.site-hero { position: relative; background: var(--navy); background-size: cover; background-position: center; color: #fff; padding: 90px 24px; text-align: center; }
+.site-hero-inner { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; align-items: center; gap: 14px; }
+.site-logo { width: 56px; height: 56px; object-fit: contain; background: #fff; border-radius: 12px; padding: 6px; }
+.site-hero h1 { margin: 0; font-size: 40px; letter-spacing: -.03em; line-height: 1.1; }
+.site-hero p { margin: 0; font-size: 17px; opacity: .9; }
+.site-hero-cta { margin-top: 10px; display: inline-block; background: var(--primary); color: var(--primary-foreground, #fff); text-decoration: none; font-weight: 600; font-size: 14px; padding: 12px 22px; border-radius: 9px; }
+.site-main { max-width: 880px; margin: 0 auto; padding: 20px 24px 40px; }
+.site-section { padding: 34px 0; border-bottom: 1px solid var(--border); }
+.site-section:last-child { border-bottom: 0; }
+.site-section h2 { margin: 0 0 16px; font-size: 22px; letter-spacing: -.02em; color: var(--navy); }
+.site-about { margin: 0; white-space: pre-wrap; color: var(--foreground); }
+.site-amenities { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+.site-amenities li { position: relative; padding: 10px 12px 10px 30px; background: var(--card); border: 1px solid var(--border); border-radius: 8px; font-size: 13px; }
+.site-amenities li::before { content: ''; position: absolute; left: 12px; top: 50%; width: 8px; height: 8px; margin-top: -4px; border-radius: 50%; background: var(--primary); }
+.site-units { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+.site-unit { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 4px; }
+.site-unit strong { font-size: 16px; color: var(--navy); }
+.site-unit span { font-size: 12px; color: var(--muted-foreground); }
+.site-unit-price { color: var(--primary) !important; font-weight: 600; }
+.site-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+.site-gallery img { width: 100%; height: 170px; object-fit: cover; border-radius: 10px; border: 1px solid var(--border); }
+.site-contact { display: grid; grid-template-columns: 1fr 1.1fr; gap: 32px; align-items: start; }
+.site-contact-info p { margin: 4px 0; color: var(--muted-foreground); }
+.site-contact-info a { color: var(--primary); text-decoration: none; }
+.site-form { display: flex; flex-direction: column; gap: 12px; background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+.site-form label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; font-weight: 600; color: var(--muted-foreground); }
+.site-form input, .site-form textarea { border: 1px solid var(--input); border-radius: 7px; padding: 9px 11px; font-size: 14px; font-family: inherit; background: var(--background); color: var(--foreground); outline: none; }
+.site-form input:focus, .site-form textarea:focus { border-color: var(--primary); }
+.site-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.site-form button { margin-top: 4px; background: var(--primary); color: var(--primary-foreground, #fff); border: 0; border-radius: 8px; padding: 12px; font-size: 14px; font-weight: 600; cursor: pointer; }
+.site-form button:disabled { opacity: .6; }
+.site-form-error { margin: 0; color: var(--danger); font-size: 12px; }
+.site-form-done { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 28px; text-align: center; }
+.site-form-done h3 { margin: 0 0 6px; color: var(--primary); font-size: 18px; }
+.site-form-done p { margin: 0; color: var(--muted-foreground); font-size: 14px; }
+.site-hp { position: absolute !important; left: -9999px !important; width: 1px; height: 1px; opacity: 0; }
+.site-footer { max-width: 880px; margin: 0 auto; padding: 24px; display: flex; justify-content: space-between; gap: 12px; color: var(--muted-foreground); font-size: 12px; border-top: 1px solid var(--border); }
+.site-missing { min-height: 100vh; display: grid; place-content: center; gap: 6px; text-align: center; padding: 24px; color: var(--muted-foreground); }
+.site-missing h1 { margin: 0; font-size: 22px; color: var(--foreground); }
+@media (max-width: 720px) {
+  .site-hero { padding: 60px 20px; }
+  .site-hero h1 { font-size: 30px; }
+  .site-contact { grid-template-columns: 1fr; gap: 20px; }
+  .site-form-row { grid-template-columns: 1fr; }
+}

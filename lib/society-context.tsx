@@ -16,9 +16,13 @@ import { getSupabase, isSupabaseConfigured } from './supabase'
 import { useAuth } from './auth-context'
 import { useSubscription } from './subscription-context'
 import { TIER_INFO, type SubscriptionTier } from './plans'
+import { type Lead, type LeadStatus } from './leads'
+import { normalizeSite, EMPTY_SITE, type SiteContent } from './site'
 
 export { TIER_INFO }
 export type { SubscriptionTier }
+export type { Lead } from './leads'
+export type { SiteContent } from './site'
 
 /* ── Types ──────────────────────────────────────────────── */
 
@@ -204,6 +208,16 @@ export type SocietyActions = {
   deletePayment: (paymentId: string) => Promise<void>
   deleteSociety: (societyId: string) => Promise<void>
   checkoutResident: (unitNumber: string, opts: { noticeGiven: boolean; deductions: number }) => Promise<void>
+  /* ── CRM (leads) — T3 ─────────────────────────────────── */
+  addLead: (input: { name: string; phone?: string; email?: string; unitPref?: string; budget?: number; message?: string; unitId?: string }) => Promise<void>
+  updateLead: (id: string, patch: Partial<Pick<Lead, 'name' | 'phone' | 'email' | 'status' | 'budget' | 'unitId' | 'unitPref' | 'notes' | 'assignedTo'>>) => Promise<void>
+  deleteLead: (id: string) => Promise<void>
+  /** Assign the lead to the signed-in user (team-wide assignment is deferred). */
+  assignLeadToMe: (id: string) => Promise<void>
+  /** Mark a lead won (called after a resident is created from it). */
+  convertLead: (id: string) => Promise<void>
+  /* ── CMS (public website) — T3 ────────────────────────── */
+  saveSite: (content: SiteContent, published: boolean) => Promise<void>
 }
 
 type Permissions = {
@@ -219,6 +233,10 @@ type Permissions = {
   isReadOnly: boolean
   atPropertyLimit: boolean
   atResidentLimit: boolean
+  /** T3: CRM / leads pipeline. */
+  canAccessCrm: boolean
+  /** T3: public marketing website (CMS). */
+  canAccessSite: boolean
 }
 
 type SocietyContextValue = {
@@ -235,6 +253,9 @@ type SocietyContextValue = {
   currentSociety: Society
   stats: SocietyStats
   loading: boolean
+  leads: Lead[]
+  site: SiteContent
+  sitePublished: boolean
   setTier: (t: SubscriptionTier) => void
   setAdminName: (name: string) => void
 } & SocietyActions & Permissions
@@ -254,8 +275,12 @@ const K = {
   payments: (s: string) => `${LS}payments_${s}`,
   audit: (s: string) => `${LS}audit_${s}`,
   reminders: (s: string) => `${LS}reminders_${s}`,
+  leads: (s: string) => `${LS}leads_${s}`,
+  site: (s: string) => `${LS}site_${s}`,
   demoSocieties: `${LS}demo_societies`,
 }
+
+type SiteCache = { content: SiteContent; published: boolean }
 
 function lsLoad<T>(key: string, fallback: T): T {
   if (typeof window === 'undefined') return fallback
@@ -272,6 +297,28 @@ function fmtDate(d: Date) {
 
 let demoReceiptNum = 1000
 
+const isUuidStr = (s: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
+
+function mapLead(r: Record<string, unknown>): Lead {
+  return {
+    id: r.id as string,
+    name: (r.name as string) ?? '',
+    phone: (r.phone as string) ?? '',
+    email: (r.email as string) ?? undefined,
+    status: ((r.status as LeadStatus) ?? 'new'),
+    source: ((r.source as Lead['source']) ?? 'website'),
+    budget: r.budget != null ? Number(r.budget) : undefined,
+    unitId: (r.unit_id as string) ?? undefined,
+    unitPref: (r.unit_pref as string) ?? '',
+    message: (r.message as string) ?? '',
+    assignedTo: (r.assigned_to as string) ?? undefined,
+    notes: (r.notes as string) ?? '',
+    convertedResidentId: (r.converted_resident_id as string) ?? undefined,
+    createdAt: (r.created_at as string) ?? new Date().toISOString(),
+    updatedAt: (r.updated_at as string) ?? (r.created_at as string) ?? new Date().toISOString(),
+  }
+}
+
 /* ── Provider ───────────────────────────────────────────── */
 
 export function SocietyProvider({ children }: { children: React.ReactNode }) {
@@ -286,10 +333,15 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
   const [payments, setPayments] = useState<PaymentRecord[]>([])
   const [reminderLog, setReminderLog] = useState<Record<string, string>>({})
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([])
+  const [leads, setLeads] = useState<Lead[]>([])
+  const [site, setSite] = useState<SiteContent>(EMPTY_SITE)
+  const [sitePublished, setSitePublished] = useState(false)
   const [loading, setLoading] = useState(true)
 
   const societyRef = useRef(currentSociety)
   societyRef.current = currentSociety
+  const leadsRef = useRef(leads); leadsRef.current = leads
+  const siteRef = useRef(site); siteRef.current = site
   const unitsRef = useRef(units); unitsRef.current = units
   const residentsRef = useRef(residents); residentsRef.current = residents
   const invoicesRef = useRef(invoices); invoicesRef.current = invoices
@@ -327,6 +379,10 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
       setPayments(lsLoad<PaymentRecord[]>(K.payments(societyId), []))
       setAuditLogs(lsLoad<AuditLog[]>(K.audit(societyId), []))
     }
+    setLeads(lsLoad<Lead[]>(K.leads(societyId), []))
+    const cachedSite = lsLoad<SiteCache | null>(K.site(societyId), null)
+    setSite(cachedSite ? normalizeSite(cachedSite.content) : EMPTY_SITE)
+    setSitePublished(cachedSite?.published ?? false)
     setReminderLog(lsLoad<Record<string, string>>(K.reminders(societyId), {}))
 
     if (!sb) {
@@ -408,21 +464,34 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
       metadata: (typeof l.metadata === 'object' && l.metadata) ? l.metadata : {}, timestamp: l.timestamp,
     }))
 
+    // CRM leads + CMS site (tables added for T3; tolerate their absence on old DBs).
+    let dbLeads: Lead[] = leadsRef.current
+    const { data: leadRows, error: leadErr } = await sb.from('leads').select('*').eq('society_id', societyId).order('created_at', { ascending: false })
+    if (!leadErr) dbLeads = (leadRows ?? []).map(mapLead)
+
+    let dbSite: SiteContent = EMPTY_SITE
+    let dbSitePublished = false
+    const { data: siteRow, error: siteErr } = await sb.from('society_sites').select('content, published').eq('society_id', societyId).maybeSingle()
+    if (!siteErr && siteRow) { dbSite = normalizeSite(siteRow.content); dbSitePublished = !!siteRow.published }
+
     if (loadReqRef.current !== societyId) return // a newer switch superseded this load
 
     setUnits(dbUnits); setResidents(dbResidents); setInvoices(dbInvoices); setPayments(dbPayments); setAuditLogs(dbAudit)
+    setLeads(dbLeads); setSite(dbSite); setSitePublished(dbSitePublished)
     lsSave(K.units(societyId), dbUnits)
     lsSave(K.residents(societyId), dbResidents)
     lsSave(K.invoices(societyId), dbInvoices)
     lsSave(K.payments(societyId), dbPayments)
     lsSave(K.audit(societyId), dbAudit)
+    lsSave(K.leads(societyId), dbLeads)
+    lsSave(K.site(societyId), { content: dbSite, published: dbSitePublished } satisfies SiteCache)
     setLoading(false)
   }, [])
 
   useEffect(() => {
     if (SB) {
       if (viewingSocietyId) void loadSociety(viewingSocietyId)
-      else { setCurrentSociety(BLANK_SOCIETY); setUnits([]); setResidents([]); setInvoices([]); setPayments([]); setAuditLogs([]); setLoading(false) }
+      else { setCurrentSociety(BLANK_SOCIETY); setUnits([]); setResidents([]); setInvoices([]); setPayments([]); setAuditLogs([]); setLeads([]); setSite(EMPTY_SITE); setSitePublished(false); setLoading(false) }
     } else {
       const demo = lsLoad<Society[]>(K.demoSocieties, [])
       const active = demo[0]
@@ -881,6 +950,98 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
     void writeAudit('RESIDENT_MOVED_OUT', { unit: unitNumber, noticeGiven: opts.noticeGiven, deposit, advance, advanceApplied, securityToRent, deductions, refund })
   }, [sid, nextReceipt, persistResident, writeAudit])
 
+  /* ── CRM: leads ─────────────────────────────────────────── */
+  const persistLeads = useCallback((next: Lead[]) => {
+    setLeads(next); lsSave(K.leads(sid), next)
+  }, [sid])
+
+  const addLead = useCallback(async (input: { name: string; phone?: string; email?: string; unitPref?: string; budget?: number; message?: string; unitId?: string }) => {
+    if (blocked()) return
+    const name = input.name.trim()
+    if (!name) return
+    const now = new Date().toISOString()
+    const sb = getSupabase()
+    let id = `lead${Date.now()}`
+    const row = {
+      society_id: sid, name, phone: (input.phone ?? '').trim(), email: input.email?.trim() || null,
+      status: 'new' as const, source: 'manual' as const, unit_pref: (input.unitPref ?? '').trim(),
+      message: (input.message ?? '').trim(), budget: input.budget ?? null, unit_id: input.unitId ?? null,
+    }
+    if (sb && sid !== BLANK_SOCIETY.id) {
+      const { data } = await sb.from('leads').insert(row).select('id').single()
+      if (data) id = data.id
+    }
+    persistLeads([{
+      id, name, phone: row.phone, email: input.email?.trim() || undefined, status: 'new', source: 'manual',
+      budget: input.budget, unitId: input.unitId, unitPref: row.unit_pref, message: row.message,
+      notes: '', createdAt: now, updatedAt: now,
+    }, ...leadsRef.current])
+    void writeAudit('LEAD_CREATED', { name, source: 'manual' })
+  }, [sid, persistLeads, writeAudit])
+
+  const updateLead = useCallback(async (id: string, patch: Partial<Pick<Lead, 'name' | 'phone' | 'email' | 'status' | 'budget' | 'unitId' | 'unitPref' | 'notes' | 'assignedTo'>>) => {
+    if (blocked()) return
+    const target = leadsRef.current.find(l => l.id === id)
+    if (!target) return
+    const now = new Date().toISOString()
+    persistLeads(leadsRef.current.map(l => l.id === id ? { ...l, ...patch, updatedAt: now } : l))
+    const sb = getSupabase()
+    if (sb && sid !== BLANK_SOCIETY.id && isUuidStr(id)) {
+      const db: Record<string, unknown> = { updated_at: now }
+      if (patch.name !== undefined) db.name = patch.name
+      if (patch.phone !== undefined) db.phone = patch.phone
+      if (patch.email !== undefined) db.email = patch.email || null
+      if (patch.status !== undefined) db.status = patch.status
+      if (patch.budget !== undefined) db.budget = patch.budget ?? null
+      if (patch.unitId !== undefined) db.unit_id = patch.unitId ?? null
+      if (patch.unitPref !== undefined) db.unit_pref = patch.unitPref
+      if (patch.notes !== undefined) db.notes = patch.notes
+      if (patch.assignedTo !== undefined) db.assigned_to = patch.assignedTo ?? null
+      try { await sb.from('leads').update(db).eq('id', id) } catch { /* noop */ }
+    }
+    if (patch.status) void writeAudit('LEAD_STATUS_CHANGED', { lead: target.name, status: patch.status })
+  }, [sid, persistLeads, writeAudit])
+
+  const deleteLead = useCallback(async (id: string) => {
+    if (blocked()) return
+    const target = leadsRef.current.find(l => l.id === id)
+    if (!target) return
+    persistLeads(leadsRef.current.filter(l => l.id !== id))
+    const sb = getSupabase()
+    if (sb && sid !== BLANK_SOCIETY.id && isUuidStr(id)) { try { await sb.from('leads').delete().eq('id', id) } catch { /* noop */ } }
+    void writeAudit('LEAD_DELETED', { lead: target.name })
+  }, [sid, persistLeads, writeAudit])
+
+  const assignLeadToMe = useCallback(async (id: string) => {
+    if (!user) return
+    await updateLead(id, { assignedTo: user.id })
+  }, [user, updateLead])
+
+  const convertLead = useCallback(async (id: string) => {
+    const target = leadsRef.current.find(l => l.id === id)
+    if (!target) return
+    await updateLead(id, { status: 'won' })
+    void writeAudit('LEAD_CONVERTED', { lead: target.name })
+  }, [updateLead, writeAudit])
+
+  /* ── CMS: public website ────────────────────────────────── */
+  const saveSite = useCallback(async (content: SiteContent, published: boolean) => {
+    if (blocked()) return
+    const clean = normalizeSite(content)
+    setSite(clean); setSitePublished(published)
+    lsSave(K.site(sid), { content: clean, published } satisfies SiteCache)
+    const sb = getSupabase()
+    if (sb && sid !== BLANK_SOCIETY.id) {
+      try {
+        await sb.from('society_sites').upsert(
+          { society_id: sid, content: clean, published, updated_by: user?.id ?? null, updated_at: new Date().toISOString() },
+          { onConflict: 'society_id' },
+        )
+      } catch { /* noop */ }
+    }
+    void writeAudit(published ? 'SITE_PUBLISHED' : 'SITE_SAVED', { published })
+  }, [sid, user, writeAudit])
+
   /* ── Reminders (derived from unpaid bills) ─────────────── */
   const overdueResidents = useMemo<OverdueResident[]>(() => {
     const today = Date.now()
@@ -1000,6 +1161,8 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
   const canAccessAdvancedReports = sub.hasFeature('advanced_reports')
   const canAccessAuditLogs = sub.hasFeature('audit_logs')
   const canMultiSociety = sub.hasFeature('multi_society')
+  const canAccessCrm = sub.hasFeature('crm_leads')
+  const canAccessSite = sub.hasFeature('public_site')
   // Team management is a T2+ feature. The panel is shown to owners and editors;
   // the API still enforces that only the plan owner can actually add/remove people.
   const canManageTeam = sub.tier !== 'TIER_1' && myAccess !== 'viewer'
@@ -1011,19 +1174,25 @@ export function SocietyProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo<SocietyContextValue>(() => ({
     units, residents, invoices, payments, overdueResidents, reminderLog, auditLogs,
     currentTier: sub.tier, adminName, societies, currentSociety, stats, loading,
+    leads, site, sitePublished,
     setTier, setAdminName,
     recordPayment, confirmPayment, sendReminder, generateMonthlyInvoices, refreshData, switchSociety, addSociety,
     addUnit, updateUnit, updateSociety, requestPlanChange, assignResident, updateResident, approveResident,
     reactivateResident, deleteResident, deleteUnit, deletePayment, deleteSociety, checkoutResident,
+    addLead, updateLead, deleteLead, assignLeadToMe, convertLead, saveSite,
     canSendAutomatedReminders, canBatchGenerate, canAccessAdvancedReports, canAccessAuditLogs, canMultiSociety, canManageTeam, myAccess,
+    canAccessCrm, canAccessSite,
     isReadOnly,
     atPropertyLimit: !sub.withinLimit('property', units.length),
     atResidentLimit: !sub.withinLimit('resident', residents.filter(r => r.accountStatus !== 'Inactive').length),
   }), [units, residents, invoices, payments, overdueResidents, reminderLog, auditLogs, sub, adminName, societies, currentSociety, stats, loading,
+      leads, site, sitePublished,
       setTier, setAdminName, recordPayment, confirmPayment, sendReminder, generateMonthlyInvoices, refreshData, switchSociety, addSociety,
       addUnit, updateUnit, updateSociety, requestPlanChange, assignResident, updateResident, approveResident, reactivateResident,
       deleteResident, deleteUnit, deletePayment, deleteSociety, checkoutResident,
-      canSendAutomatedReminders, canBatchGenerate, canAccessAdvancedReports, canAccessAuditLogs, canMultiSociety, canManageTeam, myAccess, isReadOnly])
+      addLead, updateLead, deleteLead, assignLeadToMe, convertLead, saveSite,
+      canSendAutomatedReminders, canBatchGenerate, canAccessAdvancedReports, canAccessAuditLogs, canMultiSociety, canManageTeam, myAccess,
+      canAccessCrm, canAccessSite, isReadOnly])
 
   return <SocietyContext.Provider value={value}>{children}</SocietyContext.Provider>
 }

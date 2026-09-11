@@ -24,6 +24,8 @@ export type AppUser = {
   email: string
   role: UserRole
   status: UserStatus
+  /** An admin reset this user's password — force a new-password screen before entering the app. */
+  mustChangePassword: boolean
 }
 
 export type Access = 'owner' | 'editor' | 'viewer'
@@ -42,6 +44,10 @@ type AuthActions = {
   signOut: () => Promise<void>
   updateProfile: (updates: { name?: string }) => Promise<{ ok: boolean; error?: string }>
   changePassword: (newPassword: string) => Promise<{ ok: boolean; error?: string }>
+  /** Self-service "forgot password": emails the account a reset link (login screen). */
+  requestPasswordReset: (email: string) => Promise<{ ok: boolean; error?: string }>
+  /** Finish an admin-forced password reset: set a new password and clear the flag. */
+  completeForcedPasswordChange: (newPassword: string) => Promise<{ ok: boolean; error?: string }>
   refresh: () => Promise<void>
   /** Super Admin only: drill into a specific society workspace. */
   viewSociety: (societyId: string) => void
@@ -109,16 +115,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         email: su.email ?? '',
         role: ((su.user_metadata?.role as UserRole) === 'SUPER_ADMIN' ? 'SUPER_ADMIN' : 'SOCIETY_ADMIN'),
         status: 'Active',
+        mustChangePassword: false,
       }
       const { data: appUser } = await sb.from('app_users').select('*').eq('id', su.id).maybeSingle()
       if (appUser) {
         resolved = {
           id: appUser.id, name: appUser.name, email: appUser.email,
           role: appUser.role as UserRole, status: appUser.status as UserStatus,
+          mustChangePassword: !!appUser.must_change_password,
         }
       }
       setUser(prev => (prev && prev.id === resolved.id && prev.name === resolved.name && prev.email === resolved.email
-        && prev.role === resolved.role && prev.status === resolved.status) ? prev : resolved)
+        && prev.role === resolved.role && prev.status === resolved.status
+        && prev.mustChangePassword === resolved.mustChangePassword) ? prev : resolved)
 
       let rows = (await sb
         .from('society_members')
@@ -208,6 +217,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return { ok: true }
   }, [])
 
+  const requestPasswordReset = useCallback(async (email: string) => {
+    const sb = getSupabase()
+    if (!sb) return { ok: false, error: 'Supabase is not configured on this deployment.' }
+    const redirectTo = typeof window !== 'undefined' ? `${window.location.origin}/reset-password` : undefined
+    const { error } = await sb.auth.resetPasswordForEmail(email.trim().toLowerCase(), { redirectTo })
+    // Supabase itself doesn't reveal whether the address has an account — same message either way.
+    if (error) return { ok: false, error: error.message }
+    return { ok: true }
+  }, [])
+
+  const completeForcedPasswordChange = useCallback(async (newPassword: string) => {
+    if (newPassword.length < 8) return { ok: false, error: 'Password must be at least 8 characters.' }
+    const res = await fetch('/api/auth/reset-password', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ password: newPassword }),
+    })
+    const json = await res.json().catch(() => ({}))
+    if (!res.ok) return { ok: false, error: json.error ?? 'Could not update password.' }
+    await loadProfile()
+    return { ok: true }
+  }, [loadProfile])
+
   const viewSociety = useCallback((societyId: string) => {
     setViewingSocietyId(societyId)
     lsSet(IMPERSONATE_KEY, societyId)
@@ -234,10 +265,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     user, memberships, authReady, configured,
     isSuperAdmin,
     viewingSocietyId, myAccess, homePath,
-    signIn, signOut, updateProfile, changePassword, refresh: loadProfile,
+    signIn, signOut, updateProfile, changePassword, requestPasswordReset, completeForcedPasswordChange, refresh: loadProfile,
     viewSociety, exitSocietyView,
   }), [user, memberships, authReady, configured, viewingSocietyId, isSuperAdmin, myAccess, homePath,
-      signIn, signOut, updateProfile, changePassword, loadProfile, viewSociety, exitSocietyView])
+      signIn, signOut, updateProfile, changePassword, requestPasswordReset, completeForcedPasswordChange, loadProfile, viewSociety, exitSocietyView])
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }

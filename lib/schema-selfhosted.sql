@@ -1,12 +1,25 @@
 -- ============================================================
--- Society / Plaza Manager — PostgreSQL schema (Supabase)
--- Full desired state. Safe to run on a fresh project.
--- Running on an existing project drops the old tenant tables.
+-- Society / Plaza Manager — PostgreSQL schema (self-hosted)
+-- Phase 1 of the Supabase → self-hosted Postgres migration.
+-- Full desired state. Safe to run on a fresh database.
+-- Running on an existing database drops the old tenant tables.
+--
+-- Diverges from lib/schema.sql as follows (see MIGRATION-NOTES.md
+-- at the repo root for the full rationale):
+--   - No dependency on Supabase's auth.users / auth.uid().
+--   - `users` replaces both auth.users and app_users in one table,
+--     and now owns its own password_hash for custom auth.
+--   - New `sessions` table backs custom session-token auth.
+--   - Row-Level Security is removed entirely (see the notice below).
 -- ============================================================
 
 -- ── Extensions ──────────────────────────────────────────────
+-- pgcrypto is NOT required here: PostgreSQL 13+ ships gen_random_uuid()
+-- natively, which is what users.id / sessions.id use below.
+-- uuid-ossp IS kept because every other table below still defaults its
+-- id via uuid_generate_v4() and those tables are intentionally left
+-- unchanged in this phase.
 create extension if not exists "uuid-ossp";
-create extension if not exists "pgcrypto";
 
 -- ── Enums ───────────────────────────────────────────────────
 do $$ begin
@@ -36,42 +49,37 @@ drop table if exists subscriptions   cascade;
 drop table if exists society_members cascade;
 drop table if exists audit_logs      cascade;
 drop table if exists societies       cascade;
-drop table if exists app_users       cascade;
+drop table if exists sessions        cascade;
+drop table if exists users           cascade;
 
 -- ============================================================
--- app_users — mirror of auth.users carrying the platform role
+-- users — replaces BOTH Supabase's auth.users and the old
+-- app_users table. Single source of truth for identity, the
+-- password hash, and the platform role.
 -- ============================================================
-create table app_users (
-  id          uuid primary key references auth.users(id) on delete cascade,
-  email       text not null,
-  name        text not null default '',
-  role        app_role not null default 'SOCIETY_ADMIN',
-  status      text not null default 'Active' check (status in ('Active', 'Suspended')),
+create table users (
+  id            uuid primary key default gen_random_uuid(),
+  email         text not null unique,
+  password_hash text not null,
+  name          text not null default '',
+  role          app_role not null default 'SOCIETY_ADMIN',
+  status        text not null default 'Active' check (status in ('Active', 'Suspended')),
   -- Set by an admin "Reset password" action; forces a new-password screen at next login.
   must_change_password boolean not null default false,
-  created_at  timestamptz not null default now()
+  created_at    timestamptz not null default now()
 );
-comment on table app_users is 'Every authenticated user. role = SUPER_ADMIN grants platform-wide access.';
+comment on table users is 'Every authenticated user (self-hosted auth). role = SUPER_ADMIN grants platform-wide access.';
 
--- Auto-create an app_users row whenever a Supabase auth user is created.
-create or replace function public.handle_new_auth_user()
-returns trigger language plpgsql security definer set search_path = public as $$
-begin
-  insert into public.app_users (id, email, name, role)
-  values (
-    new.id,
-    coalesce(new.email, ''),
-    coalesce(new.raw_user_meta_data ->> 'name', split_part(coalesce(new.email,''), '@', 1)),
-    coalesce((new.raw_user_meta_data ->> 'role')::app_role, 'SOCIETY_ADMIN')
-  )
-  on conflict (id) do nothing;
-  return new;
-end $$;
-
-drop trigger if exists on_auth_user_created on auth.users;
-create trigger on_auth_user_created
-  after insert on auth.users
-  for each row execute function public.handle_new_auth_user();
+-- ============================================================
+-- sessions — server-side session tokens for custom auth
+-- ============================================================
+create table sessions (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid not null references users(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  expires_at timestamptz not null
+);
+create index idx_sessions_user on sessions (user_id);
 
 -- ============================================================
 -- societies — the tenant
@@ -88,7 +96,7 @@ create table societies (
   due_day       int not null default 10 check (due_day between 1 and 28),
   late_fee_pct  numeric(5,2) not null default 0,
   status        text not null default 'active' check (status in ('active', 'suspended')),
-  created_by    uuid references app_users(id) on delete set null,
+  created_by    uuid references users(id) on delete set null,
   created_at    timestamptz not null default now()
 );
 comment on table societies is 'Top-level tenant (a housing society or a commercial plaza).';
@@ -98,7 +106,7 @@ comment on table societies is 'Top-level tenant (a housing society or a commerci
 -- ============================================================
 create table society_members (
   society_id  uuid not null references societies(id) on delete cascade,
-  user_id     uuid not null references app_users(id) on delete cascade,
+  user_id     uuid not null references users(id) on delete cascade,
   role        app_role not null default 'SOCIETY_ADMIN',
   -- owner  = bought the plan, full access + manages the team
   -- editor = can create / edit / delete workspace data
@@ -120,7 +128,7 @@ create table subscriptions (
   included_seats    int not null default 1,
   extra_seats       int not null default 0,
   extra_seat_price  numeric(12,2) not null default 500,
-  updated_by        uuid references app_users(id) on delete set null,
+  updated_by        uuid references users(id) on delete set null,
   updated_at        timestamptz not null default now()
 );
 comment on table subscriptions is 'Tier sets features/caps; users are seats. MRR = plan price + extra_seats * extra_seat_price.';
@@ -131,7 +139,7 @@ comment on table subscriptions is 'Tier sets features/caps; users are seats. MRR
 create table plan_change_requests (
   id           uuid primary key default uuid_generate_v4(),
   society_id   uuid not null references societies(id) on delete cascade,
-  requested_by uuid references app_users(id) on delete set null,
+  requested_by uuid references users(id) on delete set null,
   kind         text not null check (kind in ('tier', 'seats')),
   detail       text not null default '',
   status       text not null default 'open' check (status in ('open', 'done', 'declined')),
@@ -234,89 +242,13 @@ end $$;
 create table audit_logs (
   id            uuid primary key default uuid_generate_v4(),
   society_id    uuid not null references societies(id) on delete cascade,
-  user_id       uuid references app_users(id) on delete set null,
+  user_id       uuid references users(id) on delete set null,
   action        text not null,
   performed_by  text not null default 'system',
   metadata      jsonb not null default '{}',
   timestamp     timestamptz not null default now()
 );
 create index idx_audit_logs_society on audit_logs (society_id, timestamp desc);
-
--- ============================================================
--- Helper functions for RLS
--- ============================================================
-create or replace function public.is_super_admin()
-returns boolean language sql stable security definer set search_path = public as $$
-  select exists (
-    select 1 from app_users
-    where id = auth.uid() and role = 'SUPER_ADMIN' and status = 'Active'
-  );
-$$;
-
-create or replace function public.is_society_member(p_society uuid)
-returns boolean language sql stable security definer set search_path = public as $$
-  select exists (
-    select 1 from society_members
-    where society_id = p_society and user_id = auth.uid()
-  );
-$$;
-
--- Convenience: societies the caller can see (member OR super admin).
-create or replace function public.can_access_society(p_society uuid)
-returns boolean language sql stable security definer set search_path = public as $$
-  select public.is_super_admin() or public.is_society_member(p_society);
-$$;
-
--- ============================================================
--- Row-Level Security
--- ============================================================
-alter table app_users            enable row level security;
-alter table societies            enable row level security;
-alter table society_members      enable row level security;
-alter table subscriptions        enable row level security;
-alter table plan_change_requests enable row level security;
-alter table units                enable row level security;
-alter table residents            enable row level security;
-alter table invoices             enable row level security;
-alter table payments             enable row level security;
-alter table audit_logs           enable row level security;
-alter table receipt_counters     enable row level security;
-
--- ── app_users: self-read; super admin full ─────────────────
-create policy "app_users self read"   on app_users for select using (id = auth.uid() or public.is_super_admin());
-create policy "app_users self update" on app_users for update using (id = auth.uid()) with check (id = auth.uid());
-create policy "app_users admin write" on app_users for all using (public.is_super_admin()) with check (public.is_super_admin());
-
--- ── societies ─────────────────────────────────────────────
-create policy "societies read"  on societies for select using (public.can_access_society(id));
-create policy "societies write society-admin" on societies for update
-  using (public.is_society_member(id)) with check (public.is_society_member(id));
-create policy "societies admin all" on societies for all
-  using (public.is_super_admin()) with check (public.is_super_admin());
-
--- ── society_members ───────────────────────────────────────
-create policy "members read"  on society_members for select using (user_id = auth.uid() or public.can_access_society(society_id));
-create policy "members admin all" on society_members for all using (public.is_super_admin()) with check (public.is_super_admin());
-
--- ── subscriptions (read for members, writes super-admin only) ──
-create policy "subs read"      on subscriptions for select using (public.can_access_society(society_id));
-create policy "subs admin all" on subscriptions for all using (public.is_super_admin()) with check (public.is_super_admin());
-
--- ── plan_change_requests (members create/read own; super admin all) ──
-create policy "pcr read"   on plan_change_requests for select using (public.can_access_society(society_id));
-create policy "pcr insert" on plan_change_requests for insert with check (public.is_society_member(society_id));
-create policy "pcr admin"  on plan_change_requests for all using (public.is_super_admin()) with check (public.is_super_admin());
-
--- ── tenant data tables: full access for members + super admin ──
-create policy "units all"     on units     for all using (public.can_access_society(society_id)) with check (public.can_access_society(society_id));
-create policy "residents all" on residents for all using (public.can_access_society(society_id)) with check (public.can_access_society(society_id));
-create policy "invoices all"  on invoices  for all using (public.can_access_society(society_id)) with check (public.can_access_society(society_id));
-create policy "payments all"  on payments  for all using (public.can_access_society(society_id)) with check (public.can_access_society(society_id));
-create policy "counters all"  on receipt_counters for all using (public.can_access_society(society_id)) with check (public.can_access_society(society_id));
-
--- ── audit_logs: members + super admin read; insert by members; no update/delete ──
-create policy "audit read"   on audit_logs for select using (public.can_access_society(society_id));
-create policy "audit insert" on audit_logs for insert with check (public.can_access_society(society_id));
 
 -- ============================================================
 -- TIER_3 add-ons: CRM (leads) + CMS (public website)
@@ -342,7 +274,7 @@ create table if not exists leads (
   unit_id               uuid references units(id) on delete set null,
   unit_pref             text not null default '',
   message               text not null default '',
-  assigned_to           uuid references app_users(id) on delete set null,
+  assigned_to           uuid references users(id) on delete set null,
   notes                 text not null default '',
   converted_resident_id uuid references residents(id) on delete set null,
   created_at            timestamptz not null default now(),
@@ -356,25 +288,31 @@ create table if not exists society_sites (
   society_id  uuid primary key references societies(id) on delete cascade,
   published   boolean not null default false,
   content     jsonb not null default '{}',
-  updated_by  uuid references app_users(id) on delete set null,
+  updated_by  uuid references users(id) on delete set null,
   updated_at  timestamptz not null default now()
 );
 comment on table society_sites is 'Public marketing site for a T3 society, rendered at /site/<slug>.';
 
-alter table leads         enable row level security;
-alter table society_sites enable row level security;
-
-create policy "leads all" on leads
-  for all using (public.can_access_society(society_id)) with check (public.can_access_society(society_id));
-
-create policy "sites all" on society_sites
-  for all using (public.can_access_society(society_id)) with check (public.can_access_society(society_id));
--- Defense-in-depth: anon may read a published site. The runtime public path
--- (app/site/[slug]) actually reads via the service-role client server-side.
-create policy "sites public read" on society_sites
-  for select using (published = true);
+-- ============================================================
+-- NOTICE — Tenant isolation is enforced in the APPLICATION LAYER
+--
+-- This schema runs on plain self-hosted Postgres, not Supabase, so
+-- there is no auth.uid() / auth.jwt() for Row-Level Security policies
+-- to key off. RLS, and the is_super_admin() / is_society_member() /
+-- can_access_society() helper functions that backed it, have been
+-- removed entirely from this file on purpose.
+--
+-- This means Postgres will NOT stop a query from reading or writing
+-- another society's data. Every query that touches a tenant-scoped
+-- table (societies, society_members, subscriptions,
+-- plan_change_requests, units, residents, invoices, payments,
+-- receipt_counters, audit_logs, leads, society_sites) MUST filter by
+-- society_id itself, and every API route MUST re-derive society_id
+-- from the authenticated session — never trust a society_id supplied
+-- by the client — before running that query.
+-- ============================================================
 
 -- ============================================================
--- Seed: promote a super admin (run AFTER the user signs up once)
---   update app_users set role = 'SUPER_ADMIN' where email = 'you@company.com';
+-- Seed: promote a super admin (run AFTER the first user is created)
+--   update users set role = 'SUPER_ADMIN' where email = 'you@company.com';
 -- ============================================================

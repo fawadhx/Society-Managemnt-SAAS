@@ -3,8 +3,9 @@
 import { use, useCallback, useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { ArrowLeft, ExternalLink, Trash2, UserPlus } from 'lucide-react'
+import { ArrowLeft, ExternalLink, KeyRound, Trash2, UserPlus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import ResetPasswordModal from '@/components/reset-password-modal'
 import {
   fetchClient, fetchClientUsers, fetchPlanRequests, fetchClientActivity, updateClient, addClientUser, removeClientUser, setClientUserAccess, resolveRequest,
   type AdminClient, type ClientUser, type PlanRequest, type ActivityEntry,
@@ -26,6 +27,7 @@ export default function ClientDetailPage({ params }: { params: Promise<{ id: str
   const [loading, setLoading] = useState(true)
   const [msg, setMsg] = useState('')
   const [newUser, setNewUser] = useState({ name: '', email: '', password: '', access: 'editor' })
+  const [resetTarget, setResetTarget] = useState<ClientUser | null>(null)
 
   const load = useCallback(() => {
     setLoading(true)
@@ -131,7 +133,12 @@ export default function ClientDetailPage({ params }: { params: Promise<{ id: str
                   <option value="owner">Owner</option><option value="editor">Editor</option><option value="viewer">Viewer</option>
                 </select></td>
                 <td>{u.status}</td><td>{new Date(u.createdAt).toLocaleDateString()}</td>
-                <td>{u.access === 'owner' ? null : <button className="action-btn action-delete" title="Remove" onClick={() => { if (confirm(`Remove ${u.name || u.email}?`)) removeClientUser(id, u.id).then(() => { flash('User removed'); load() }).catch(err => flash(err instanceof Error ? err.message : 'Failed')) }}><Trash2 size={13} /></button>}</td>
+                <td>
+                  <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
+                    <button className="action-btn" title="Reset password" onClick={() => setResetTarget(u)}><KeyRound size={13} /></button>
+                    {u.access === 'owner' ? null : <button className="action-btn action-delete" title="Remove" onClick={() => { if (confirm(`Remove ${u.name || u.email}?`)) removeClientUser(id, u.id).then(() => { flash('User removed'); load() }).catch(err => flash(err instanceof Error ? err.message : 'Failed')) }}><Trash2 size={13} /></button>}
+                  </div>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -193,6 +200,15 @@ export default function ClientDetailPage({ params }: { params: Promise<{ id: str
             </tbody>
           </table></div>
         </div>
+      )}
+
+      {resetTarget && (
+        <ResetPasswordModal
+          societyId={id}
+          user={resetTarget}
+          close={() => setResetTarget(null)}
+          onSuccess={m => { setResetTarget(null); flash(m); load() }}
+        />
       )}
     </>
   )

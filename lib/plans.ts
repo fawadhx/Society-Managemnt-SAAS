@@ -23,6 +23,8 @@ export type FeatureKey =
   | 'advanced_reports'
   | 'multi_society'
   | 'audit_logs'
+  | 'crm_leads'
+  | 'public_site'
 
 /** Subscription record stored against a society/organization (maps to the `subscriptions` row). */
 export type SocietySubscription = {
@@ -88,20 +90,20 @@ export const PLANS: Record<SubscriptionTier, Plan> = {
     tier: 'TIER_1', label: 'T1 Basic', name: 'Basic', price: 1500, interval: 'monthly',
     propertyLimit: 50, residentLimit: 150, includedSeats: 1, userLimit: 1,
     features: [],
-    featuresExcluded: ['batch_billing', 'whatsapp_reminders', 'advanced_reports', 'multi_society', 'audit_logs'],
+    featuresExcluded: ['batch_billing', 'whatsapp_reminders', 'advanced_reports', 'multi_society', 'audit_logs', 'crm_leads', 'public_site'],
     status: 'active',
   },
   TIER_2: {
     tier: 'TIER_2', label: 'T2 Pro', name: 'Pro', price: 3000, interval: 'monthly',
     propertyLimit: 250, residentLimit: 1000, includedSeats: 3, userLimit: 3,
     features: ['batch_billing', 'whatsapp_reminders', 'advanced_reports'],
-    featuresExcluded: ['multi_society', 'audit_logs'],
+    featuresExcluded: ['multi_society', 'audit_logs', 'crm_leads', 'public_site'],
     status: 'active',
   },
   TIER_3: {
     tier: 'TIER_3', label: 'T3 Enterprise', name: 'Enterprise', price: 5000, interval: 'monthly',
     propertyLimit: -1, residentLimit: -1, includedSeats: 10, userLimit: 10,
-    features: ['batch_billing', 'whatsapp_reminders', 'advanced_reports', 'multi_society', 'audit_logs'],
+    features: ['batch_billing', 'whatsapp_reminders', 'advanced_reports', 'multi_society', 'audit_logs', 'crm_leads', 'public_site'],
     featuresExcluded: [],
     status: 'active',
   },

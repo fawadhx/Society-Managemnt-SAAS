@@ -139,5 +139,6 @@ export const createClient = (input: CreateClientInput) => api('/api/admin/client
 export const updateClient = (id: string, patch: Record<string, unknown>) => api(`/api/admin/clients/${id}`, 'PATCH', patch)
 export const addClientUser = (id: string, user: { name: string; email: string; password: string; access: string }) => api(`/api/admin/clients/${id}/users`, 'POST', user)
 export const removeClientUser = (id: string, userId: string) => api(`/api/admin/clients/${id}/users`, 'DELETE', { userId })
+export const resetClientUserPassword = (id: string, userId: string, password: string) => api(`/api/admin/clients/${id}/users`, 'PUT', { userId, password })
 export const setClientUserAccess = (id: string, userId: string, access: string) => api(`/api/admin/clients/${id}/users`, 'PATCH', { userId, access })
 export const resolveRequest = (id: string, status: 'done' | 'declined') => api(`/api/admin/requests/${id}`, 'PATCH', { status })

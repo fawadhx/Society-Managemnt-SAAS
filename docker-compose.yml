@@ -1,0 +1,16 @@
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-society_manager}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-society_manager}
+      POSTGRES_DB: ${POSTGRES_DB:-society_manager}
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./lib/schema-selfhosted.sql:/docker-entrypoint-initdb.d/schema-selfhosted.sql
+
+volumes:
+  db_data:

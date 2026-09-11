@@ -3,6 +3,7 @@ import type { Metadata, Viewport } from 'next'
 import { AuthProvider } from '@/lib/auth-context'
 import { SubscriptionProvider } from '@/lib/subscription-context'
 import { SocietyProvider } from '@/lib/society-context'
+import PasswordGate from '@/components/password-gate'
 import './globals.css'
 
 export const metadata: Metadata = {
@@ -41,7 +42,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         <AuthProvider>
           <SubscriptionProvider>
             <SocietyProvider>
-              {children}
+              <PasswordGate>{children}</PasswordGate>
               {process.env.NODE_ENV === 'production' && <Analytics />}
             </SocietyProvider>
           </SubscriptionProvider>

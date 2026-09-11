@@ -7,6 +7,7 @@ import {
   CreditCard, FileText, HelpCircle, Home, LayoutDashboard, MoreHorizontal, Plus,
   Receipt, Search, Settings, ShieldCheck, Users, WalletCards, X, Send, Download, CheckCircle2,
   AlertCircle, Clock3, TrendingUp, Landmark, SlidersHorizontal, Lock, PanelLeftClose, PanelLeft, Pencil, Sun, Moon, Eye, UserPlus, UserCheck, LogOut,
+  Globe, Sparkles,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useSociety, invoiceDisplayStatus, outstandingForUnit, paymentStatusFor, residentForUnit, type Resident, type PaymentRecord } from '@/lib/society-context'
@@ -22,18 +23,22 @@ import ResidentDetailModal from '@/components/resident-detail-modal'
 import PropertyDetailModal from '@/components/property-detail-modal'
 import SocietyProfileForm from '@/components/society-profile-form'
 import TeamPanel from '@/components/team-panel'
-import type { AuditLog } from '@/lib/society-context'
+import LeadsView from '@/components/leads-view'
+import WebsiteView from '@/components/website-view'
+import type { AuditLog, Lead } from '@/lib/society-context'
 import { seedCurrentSociety } from '@/lib/seed'
 import { toCsv, downloadCsv } from '@/lib/csv'
 
-type View = 'Dashboard' | 'Properties' | 'Residents' | 'Billing' | 'Payments' | 'Reminders' | 'Reports' | 'Team' | 'Settings'
+type View = 'Dashboard' | 'Properties' | 'Residents' | 'Billing' | 'Payments' | 'Reminders' | 'Reports' | 'Leads' | 'Website' | 'Team' | 'Settings'
 type Modal = 'charges' | 'payment' | 'reminder' | 'property' | 'resident' | 'editProperty' | 'editResident' | 'checkout' | 'residentDetail' | 'propertyDetail' | null
 
-const nav: { label: View; icon: typeof Home; teamOnly?: boolean }[] = [
+const nav: { label: View; icon: typeof Home; teamOnly?: boolean; t3Only?: boolean }[] = [
   { label: 'Dashboard', icon: LayoutDashboard }, { label: 'Properties', icon: Building2 },
   { label: 'Residents', icon: Users }, { label: 'Billing', icon: Receipt },
   { label: 'Payments', icon: CreditCard }, { label: 'Reminders', icon: Bell },
-  { label: 'Reports', icon: FileText }, { label: 'Team', icon: UserPlus, teamOnly: true },
+  { label: 'Reports', icon: FileText },
+  { label: 'Leads', icon: Sparkles, t3Only: true }, { label: 'Website', icon: Globe, t3Only: true },
+  { label: 'Team', icon: UserPlus, teamOnly: true },
   { label: 'Settings', icon: Settings },
 ]
 const fmt = (value: number) => `PKR ${value.toLocaleString('en-PK')}`
@@ -325,11 +330,11 @@ function CheckoutModal({ unitNumber, close, onSuccess }: { unitNumber: string; c
 }
 
 export default function WorkspaceApp() {
-  const { residents: ctxResidents, payments: ctxPayments, overdueResidents: ctxOverdue, units, currentTier, adminName, currentSociety, requestPlanChange, myAccess, canManageTeam } = useSociety()
+  const { residents: ctxResidents, payments: ctxPayments, overdueResidents: ctxOverdue, units, currentTier, adminName, currentSociety, requestPlanChange, myAccess, canManageTeam, convertLead } = useSociety()
   const { signOut, isSuperAdmin, viewingSocietyId, exitSocietyView } = useAuth()
   const subInfo = useSubscription()
   const brandName = currentSociety.name || 'Society Manager'
-  const [view, setView] = useState<View>('Dashboard'); const [mobileNav, setMobileNav] = useState(false); const [modal, setModal] = useState<Modal>(null); const [notice, setNotice] = useState(''); const [query, setQuery] = useState(''); const [trend, setTrend] = useState<'collection' | 'outstanding'>('collection'); const [profileModal, setProfileModal] = useState(false); const [societyModal, setSocietyModal] = useState(false); const [notificationsModal, setNotificationsModal] = useState(false);  const [sidebarCollapsed, setSidebarCollapsed] = useState(false); const [theme, setTheme] = useState<'light' | 'dark'>('light'); const [editingUnit, setEditingUnit] = useState<string | null>(null); const [editingResident, setEditingResident] = useState<string | null>(null); const [paymentUnit, setPaymentUnit] = useState<string | null>(null); const [residentUnit, setResidentUnit] = useState<string | null>(null); const [detailUnit, setDetailUnit] = useState<string | null>(null); const [propertyDetailId, setPropertyDetailId] = useState<string | null>(null); const [residentPrefill, setResidentPrefill] = useState<{ name: string; phone: string; email?: string } | null>(null)
+  const [view, setView] = useState<View>('Dashboard'); const [mobileNav, setMobileNav] = useState(false); const [modal, setModal] = useState<Modal>(null); const [notice, setNotice] = useState(''); const [query, setQuery] = useState(''); const [trend, setTrend] = useState<'collection' | 'outstanding'>('collection'); const [profileModal, setProfileModal] = useState(false); const [societyModal, setSocietyModal] = useState(false); const [notificationsModal, setNotificationsModal] = useState(false);  const [sidebarCollapsed, setSidebarCollapsed] = useState(false); const [theme, setTheme] = useState<'light' | 'dark'>('light'); const [editingUnit, setEditingUnit] = useState<string | null>(null); const [editingResident, setEditingResident] = useState<string | null>(null); const [paymentUnit, setPaymentUnit] = useState<string | null>(null); const [residentUnit, setResidentUnit] = useState<string | null>(null); const [detailUnit, setDetailUnit] = useState<string | null>(null); const [propertyDetailId, setPropertyDetailId] = useState<string | null>(null); const [residentPrefill, setResidentPrefill] = useState<{ name: string; phone: string; email?: string } | null>(null); const [pendingLeadId, setPendingLeadId] = useState<string | null>(null)
 
   // Row shape: [unitNumber, name, phone, residentId] — the id lets the table
   // resolve the exact resident record even when a unit has move-out history.
@@ -385,13 +390,13 @@ export default function WorkspaceApp() {
         {!subInfo.isReadOnly && myAccess === 'viewer' && <div className="plan-banner plan-banner-admin"><Eye size={15} />You have <strong>view-only</strong> access. Ask the workspace owner for edit rights.</div>}
         {!subInfo.isReadOnly && subInfo.status === 'trialing' && <div className="plan-banner plan-banner-warn"><Clock3 size={15} />Trial — <strong>{subInfo.daysLeftInTrial} day{subInfo.daysLeftInTrial === 1 ? '' : 's'} left</strong>. {!isSuperAdmin && <button className="linkish" onClick={() => { void requestPlanChange('tier', 'Activate subscription'); notify('Activation request sent to your provider.') }}>Request activation</button>}</div>}
         {!subInfo.isReadOnly && subInfo.status === 'past_due' && <div className="plan-banner plan-banner-warn"><AlertCircle size={15} />Payment overdue — please settle with your provider to avoid interruption.</div>}
-        {view === 'Dashboard' ? <Dashboard trend={trend} setTrend={setTrend} open={open} /> : <SectionView view={view} query={query} filteredResidentRows={filteredResidentRows} paymentRows={paymentRows} open={open} notify={notify} onNavigate={setView} onViewResident={(unitNum) => { setDetailUnit(unitNum); setModal('residentDetail') }} onViewProperty={(unitId) => { setPropertyDetailId(unitId); setModal('propertyDetail') }} onRecordPayment={openPaymentFor} onEditUnit={(id) => { setEditingUnit(id); setModal('editProperty') }} onEditResident={(unitNum) => { setEditingResident(unitNum); setModal('editResident') }} onCheckout={(unitNum) => { setEditingResident(unitNum); setModal('checkout') }} onReassign={(r) => { setResidentPrefill({ name: r.name, phone: r.phone, email: r.email }); setResidentUnit(null); setModal('resident') }} />}
+        {view === 'Dashboard' ? <Dashboard trend={trend} setTrend={setTrend} open={open} /> : <SectionView view={view} query={query} filteredResidentRows={filteredResidentRows} paymentRows={paymentRows} open={open} notify={notify} onNavigate={setView} onViewResident={(unitNum) => { setDetailUnit(unitNum); setModal('residentDetail') }} onViewProperty={(unitId) => { setPropertyDetailId(unitId); setModal('propertyDetail') }} onRecordPayment={openPaymentFor} onEditUnit={(id) => { setEditingUnit(id); setModal('editProperty') }} onEditResident={(unitNum) => { setEditingResident(unitNum); setModal('editResident') }} onCheckout={(unitNum) => { setEditingResident(unitNum); setModal('checkout') }} onReassign={(r) => { setResidentPrefill({ name: r.name, phone: r.phone, email: r.email }); setResidentUnit(null); setModal('resident') }} onConvertLead={(lead) => { setResidentPrefill({ name: lead.name, phone: lead.phone, email: lead.email }); setResidentUnit(null); setPendingLeadId(lead.id); setModal('resident') }} />}
       </div>
     </main>
     {modal === 'payment' && <RecordPaymentModal initialUnit={paymentUnit ?? undefined} close={() => { setModal(null); setPaymentUnit(null) }} onSuccess={(msg) => { setModal(null); setPaymentUnit(null); notify(msg) }} />}
     {modal === 'charges' && <GenerateChargesModal close={() => setModal(null)} onSuccess={(msg) => { setModal(null); notify(msg) }} />}
     {modal === 'property' && <PropertyModal close={() => setModal(null)} onSuccess={(msg) => { setModal(null); notify(msg) }} />}
-    {modal === 'resident' && <AddResidentModal initialUnit={residentUnit ?? undefined} prefill={residentPrefill ?? undefined} close={() => { setModal(null); setResidentUnit(null); setResidentPrefill(null) }} onSuccess={(msg) => { setModal(null); setResidentUnit(null); setResidentPrefill(null); notify(msg) }} />}
+    {modal === 'resident' && <AddResidentModal initialUnit={residentUnit ?? undefined} prefill={residentPrefill ?? undefined} close={() => { setModal(null); setResidentUnit(null); setResidentPrefill(null); setPendingLeadId(null) }} onSuccess={(msg) => { setModal(null); setResidentUnit(null); setResidentPrefill(null); if (pendingLeadId) { void convertLead(pendingLeadId); setPendingLeadId(null); notify('Lead converted — resident added.') } else { notify(msg) } }} />}
     {modal === 'editProperty' && editingUnit && <EditPropertyModal unitId={editingUnit} close={() => { setModal(null); setEditingUnit(null) }} onSuccess={(msg) => { setModal(null); setEditingUnit(null); notify(msg) }} />}
     {modal === 'editResident' && editingResident && <EditResidentModal unitNumber={editingResident} close={() => { setModal(null); setEditingResident(null) }} onSuccess={(msg) => { setModal(null); setEditingResident(null); notify(msg) }} />}
     {modal === 'checkout' && editingResident && <CheckoutModal unitNumber={editingResident} close={() => { setModal(null); setEditingResident(null) }} onSuccess={(msg) => { setModal(null); setEditingResident(null); notify(msg) }} />}
@@ -788,8 +793,8 @@ function BillingView({ query, notify, onGenerate, onRecordPayment }: {
   </>
 }
 
-function SectionView({ view, query, filteredResidentRows, paymentRows, open, notify, onNavigate, onViewResident, onViewProperty, onRecordPayment, onEditUnit, onEditResident, onCheckout, onReassign }: { view: View; query: string; filteredResidentRows: string[][]; paymentRows: string[][]; open: (v: Exclude<Modal, null>) => void; notify: (msg: string) => void; onNavigate: (v: View) => void; onViewResident: (unitNumber: string) => void; onViewProperty: (unitId: string) => void; onRecordPayment: (unitNumber: string | null) => void; onEditUnit: (unitId: string) => void; onEditResident: (unitNumber: string) => void; onCheckout: (unitNumber: string) => void; onReassign: (r: { name: string; phone: string; email?: string }) => void }) {
-  const { units, residents, payments: ctxPayments, overdueResidents, invoices: ctxInvoices, auditLogs, sendReminder, confirmPayment, deletePayment, canSendAutomatedReminders, canAccessAdvancedReports, canAccessAuditLogs, canManageTeam, currentTier, currentSociety, refreshData, deleteUnit, stats, approveResident, requestPlanChange, updateSociety, isReadOnly } = useSociety()
+function SectionView({ view, query, filteredResidentRows, paymentRows, open, notify, onNavigate, onViewResident, onViewProperty, onRecordPayment, onEditUnit, onEditResident, onCheckout, onReassign, onConvertLead }: { view: View; query: string; filteredResidentRows: string[][]; paymentRows: string[][]; open: (v: Exclude<Modal, null>) => void; notify: (msg: string) => void; onNavigate: (v: View) => void; onViewResident: (unitNumber: string) => void; onViewProperty: (unitId: string) => void; onRecordPayment: (unitNumber: string | null) => void; onEditUnit: (unitId: string) => void; onEditResident: (unitNumber: string) => void; onCheckout: (unitNumber: string) => void; onReassign: (r: { name: string; phone: string; email?: string }) => void; onConvertLead: (lead: Lead) => void }) {
+  const { units, residents, payments: ctxPayments, overdueResidents, invoices: ctxInvoices, auditLogs, sendReminder, confirmPayment, deletePayment, canSendAutomatedReminders, canAccessAdvancedReports, canAccessAuditLogs, canManageTeam, canAccessCrm, canAccessSite, currentTier, currentSociety, refreshData, deleteUnit, stats, approveResident, requestPlanChange, updateSociety, isReadOnly } = useSociety()
   const settingsSub = useSubscription()
   const { user: settingsUser } = useAuth()
   const [seeding, setSeeding] = useState(false)
@@ -850,7 +855,7 @@ function SectionView({ view, query, filteredResidentRows, paymentRows, open, not
       setSeeding(false)
     }
   }
-  const config: Record<View, { title: string; subtitle: string; action?: Exclude<Modal, null> }> = { Properties: { title: 'Properties', subtitle: 'Manage units, blocks, and occupancy across your society.', action: 'property' }, Residents: { title: 'Residents', subtitle: 'Keep resident contacts and account status up to date.', action: 'resident' }, Billing: { title: 'Billing & charges', subtitle: 'Create monthly invoices and monitor what is due.', action: 'charges' }, Payments: { title: 'Payments', subtitle: 'Review incoming payments and receipts.', action: 'payment' }, Reminders: { title: 'Payment reminders', subtitle: 'Follow up with residents who have outstanding balances.', action: 'reminder' }, Reports: { title: 'Reports', subtitle: 'Understand collections and society performance.', action: undefined }, Team: { title: 'Team', subtitle: 'Add people and control who can view or edit this workspace.', action: undefined }, Settings: { title: 'Settings', subtitle: 'Configure your society and administrator preferences.', action: undefined }, Dashboard: { title: 'Dashboard', subtitle: '', action: undefined } }
+  const config: Record<View, { title: string; subtitle: string; action?: Exclude<Modal, null> }> = { Properties: { title: 'Properties', subtitle: 'Manage units, blocks, and occupancy across your society.', action: 'property' }, Residents: { title: 'Residents', subtitle: 'Keep resident contacts and account status up to date.', action: 'resident' }, Billing: { title: 'Billing & charges', subtitle: 'Create monthly invoices and monitor what is due.', action: 'charges' }, Payments: { title: 'Payments', subtitle: 'Review incoming payments and receipts.', action: 'payment' }, Reminders: { title: 'Payment reminders', subtitle: 'Follow up with residents who have outstanding balances.', action: 'reminder' }, Reports: { title: 'Reports', subtitle: 'Understand collections and society performance.', action: undefined }, Leads: { title: 'Leads', subtitle: 'Track prospective residents from your website inquiry form to move-in.', action: undefined }, Website: { title: 'Website', subtitle: 'Build the public page prospects see — and where they submit inquiries.', action: undefined }, Team: { title: 'Team', subtitle: 'Add people and control who can view or edit this workspace.', action: undefined }, Settings: { title: 'Settings', subtitle: 'Configure your society and administrator preferences.', action: undefined }, Dashboard: { title: 'Dashboard', subtitle: '', action: undefined } }
   const c = config[view]
   const showTable = view === 'Properties' && units.length > 0
   const q = query.trim().toLowerCase()
@@ -886,6 +891,8 @@ function SectionView({ view, query, filteredResidentRows, paymentRows, open, not
               <li className="excluded"><Lock size={14} />Advanced reports</li>
               <li className="excluded"><Lock size={14} />Multi-society management</li>
               <li className="excluded"><Lock size={14} />Audit logs</li>
+              <li className="excluded"><Lock size={14} />Public website (CMS)</li>
+              <li className="excluded"><Lock size={14} />Leads / CRM</li>
             </ul>
             {currentTier !== 'TIER_1' ? <div className="pricing-current">Current Plan</div> : <Button size="sm" className="pricing-upgrade-btn" onClick={() => requestUpgrade('TIER_2')}>Request T2 Pro</Button>}
           </div>
@@ -901,6 +908,8 @@ function SectionView({ view, query, filteredResidentRows, paymentRows, open, not
               <li className="included"><CheckCircle2 size={14} />Advanced reports</li>
               <li className="excluded"><Lock size={14} />Multi-society management</li>
               <li className="excluded"><Lock size={14} />Audit logs</li>
+              <li className="excluded"><Lock size={14} />Public website (CMS)</li>
+              <li className="excluded"><Lock size={14} />Leads / CRM</li>
             </ul>
             {currentTier === 'TIER_2' ? <Button size="sm" className="pricing-upgrade-btn" onClick={() => requestUpgrade('TIER_3')}>Request T3 Enterprise</Button> : currentTier === 'TIER_3' ? <div className="pricing-current">Current Plan</div> : <Button size="sm" variant="outline" className="pricing-upgrade-btn" onClick={() => requestUpgrade('TIER_3')}>Request T3 Enterprise</Button>}
           </div>
@@ -916,6 +925,8 @@ function SectionView({ view, query, filteredResidentRows, paymentRows, open, not
               <li className="included"><CheckCircle2 size={14} />Advanced reports</li>
               <li className="included"><CheckCircle2 size={14} />Multi-society management</li>
               <li className="included"><CheckCircle2 size={14} />Audit logs</li>
+              <li className="included"><CheckCircle2 size={14} />Public website (CMS)</li>
+              <li className="included"><CheckCircle2 size={14} />Leads / CRM</li>
             </ul>
             {currentTier === 'TIER_3' ? <div className="pricing-current">Current Plan</div> : <Button size="sm" variant="outline" className="pricing-upgrade-btn" onClick={() => requestUpgrade('TIER_3')}>Request T3 Enterprise</Button>}
           </div>
@@ -970,7 +981,7 @@ function SectionView({ view, query, filteredResidentRows, paymentRows, open, not
       <div className="tier-comparison-banner">
         <div className={`tier-comp-col ${currentTier === 'TIER_1' ? 'active' : ''}`}><span className="tier-comp-label">T1 Basic</span><p>Manual SMS</p><span className="tier-comp-price">PKR 1,500/mo</span>{currentTier === 'TIER_1' && <span className="tier-active-check">✓ Active</span>}</div>
         <div className={`tier-comp-col ${currentTier === 'TIER_2' ? 'active' : ''}`}><span className="tier-comp-label">T2 Pro</span><p>WhatsApp Automation</p><span className="tier-comp-price">PKR 3,000/mo</span>{currentTier === 'TIER_2' && <span className="tier-active-check">✓ Active</span>}</div>
-        <div className={`tier-comp-col ${currentTier === 'TIER_3' ? 'active' : ''}`}><span className="tier-comp-label">T3 Enterprise</span><p>Priority Bulk WhatsApp API</p><span className="tier-comp-price">PKR 5,000/mo</span>{currentTier === 'TIER_3' && <span className="tier-active-check">✓ Active</span>}</div>
+        <div className={`tier-comp-col ${currentTier === 'TIER_3' ? 'active' : ''}`}><span className="tier-comp-label">T3 Enterprise</span><p>WhatsApp Automation</p><span className="tier-comp-price">PKR 5,000/mo</span>{currentTier === 'TIER_3' && <span className="tier-active-check">✓ Active</span>}</div>
       </div>
       {(() => {
         const pending = ctxPayments.filter(p => p.status === 'Pending')
@@ -1001,6 +1012,22 @@ function SectionView({ view, query, filteredResidentRows, paymentRows, open, not
     </>
   }
 
+  if (view === 'Leads') {
+    return <>
+      <div className="page-heading"><div><p className="eyebrow">{currentSociety.name}</p><h1>Leads</h1><p className="muted">{c.subtitle}</p></div></div>
+      {canAccessCrm
+        ? <LeadsView query={query} notify={notify} onConvert={onConvertLead} onNavigate={onNavigate} />
+        : <div className="panel"><div className="panel-head"><div><h2>Leads &amp; CRM</h2></div></div><div className="upgrade-banner"><Sparkles size={20} /><p>Capture and manage prospective residents on <strong>T3 Enterprise</strong>. Your public website&apos;s inquiry form feeds straight into this pipeline. <button className="linkish" onClick={() => onNavigate('Settings')}>See plans</button></p></div></div>}
+    </>
+  }
+  if (view === 'Website') {
+    return <>
+      <div className="page-heading"><div><p className="eyebrow">{currentSociety.name}</p><h1>Website</h1><p className="muted">{c.subtitle}</p></div></div>
+      {canAccessSite
+        ? <WebsiteView notify={notify} onNavigate={onNavigate} />
+        : <div className="panel"><div className="panel-head"><div><h2>Public website</h2></div></div><div className="upgrade-banner"><Globe size={20} /><p>Give your {currentSociety.kind === 'plaza' ? 'plaza' : 'society'} a branded public website with a lead-capture form on <strong>T3 Enterprise</strong>. <button className="linkish" onClick={() => onNavigate('Settings')}>See plans</button></p></div></div>}
+    </>
+  }
   if (view === 'Team') {
     return <>
       <div className="page-heading"><div><p className="eyebrow">{currentSociety.name}</p><h1>Team</h1><p className="muted">{c.subtitle}</p></div></div>
